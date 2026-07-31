@@ -36,11 +36,11 @@ function fmtTokens(n: number) {
 
 function countdown(iso: string) {
   const diff = new Date(iso).getTime() - Date.now()
-  if (diff <= 0) return "Reset sekarang"
+  if (diff <= 0) return "00:00:00"
   const h = Math.floor(diff / 3600000)
   const m = Math.floor((diff % 3600000) / 60000)
   const s = Math.floor((diff % 60000) / 1000)
-  return `${h}j ${m}m ${s}d`
+  return [h, m, s].map(n => String(n).padStart(2, "0")).join(":")
 }
 
 export default function App() {
@@ -69,6 +69,12 @@ export default function App() {
     const id = setInterval(checkQuota, 60000)
     return () => clearInterval(id)
   }, [checkQuota])
+
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
 
   const pct = data
     ? (data.current_usage.tokens_used_in_current_window / data.token_limit_per_5h) * 100
@@ -134,7 +140,7 @@ export default function App() {
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
                     Reset window
                   </p>
-                  <p className="mt-1 font-semibold">
+                  <p className="mt-1 font-semibold tabular-nums whitespace-nowrap">
                     {countdown(data.current_usage.window_ends_at)}
                   </p>
                 </div>
