@@ -10,6 +10,8 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
+import { useTheme } from "./theme"
+import { Moon, Sun } from "lucide-react"
 
 interface QuotaData {
   name: string
@@ -42,6 +44,7 @@ function countdown(iso: string) {
 }
 
 export default function App() {
+  const { theme, toggle } = useTheme()
   const [data, setData] = useState<QuotaData | null>(null)
   const [status, setStatus] = useState<Status>("loading")
   const [error, setError] = useState("")
@@ -88,9 +91,20 @@ export default function App() {
                   : "Memuat…"}
             </CardDescription>
           </div>
-          <Badge variant={badgeVariant}>
-            {status === "loading" ? "Mengecek…" : status === "ok" ? "OK" : "Gagal"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant={badgeVariant}>
+              {status === "loading" ? "Mengecek…" : status === "ok" ? "OK" : "Gagal"}
+            </Badge>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-7 w-7"
+              onClick={toggle}
+              aria-label={theme === "dark" ? "Mode terang" : "Mode gelap"}
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </Button>
+          </div>
         </CardHeader>
 
         <CardContent className="flex flex-col gap-4">
