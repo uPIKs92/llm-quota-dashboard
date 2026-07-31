@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLM Quota</title>
+<style>
+:root { --bg:#f7f7f8; --card:#fff; --text:#1a1a1a; --muted:#666; --border:#e3e3e6; --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444; --accent:#4f46e5; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#111113; --card:#1a1a1e; --text:#f0f0f2; --muted:#9a9aa2; --border:#2c2c31; }
+}
+body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; }
+main { width:min(480px,92vw); background:var(--card); border:1px solid var(--border); border-radius:16px; padding:24px; box-shadow:0 8px 30px rgba(0,0,0,.06); }
+h1 { font-size:1.4rem; margin:0; }
+header { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+.badge { font-size:.7rem; font-weight:600; padding:3px 10px; border-radius:999px; }
+.badge.ok { background:#dcfce7; color:#15803d; }
+.badge.error { background:#fee2e2; color:#b91c1c; }
+.badge.loading { background:#e0e7ff; color:#4338ca; }
+.hidden { display:none !important; }
+button { width:100%; padding:10px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+button.secondary { background:transparent; border:1px solid var(--border); color:var(--text); }
+#key-meta { font-size:.85rem; color:var(--muted); margin-bottom:14px; }
+#progress-wrap { height:14px; background:var(--border); border-radius:999px; overflow:hidden; }
+#progress-bar { height:100%; width:0; border-radius:999px; transition:width .4s ease; }
+#progress-bar.ok { background:var(--ok); } #progress-bar.warn { background:var(--warn); } #progress-bar.danger { background:var(--danger); }
+#progress-labels { display:flex; justify-content:space-between; font-size:.8rem; color:var(--muted); margin:6px 0 18px; }
+.stats { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:0; }
+.stats div { background:var(--bg); border-radius:10px; padding:10px 12px; }
+.stats dt { font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.stats dd { margin:4px 0 0; font-size:.95rem; font-weight:600; }
+.error { background:#fee2e2; color:#b91c1c; padding:10px 12px; border-radius:8px; font-size:.85rem; }
+</style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>GLM Quota</h1>
+      <span id="status-badge" class="badge hidden"></span>
+    </header>
+
+    <section id="dashboard-view">
+      <div id="key-meta"><span id="key-name"></span> · <span id="key-model"></span></div>
+      <div id="progress-wrap"><div id="progress-bar"></div></div>
+      <div id="progress-labels">
+        <span id="used-label"></span>
+        <span id="remaining-label"></span>
+      </div>
+      <dl class="stats">
+        <div><dt>Reset window</dt><dd id="reset-countdown"></dd></div>
+        <div><dt>Expired</dt><dd id="expiry-date"></dd></div>
+        <div><dt>Total requests</dt><dd id="total-requests"></dd></div>
+        <div><dt>Last used</dt><dd id="last-used"></dd></div>
+      </dl>
+      <p class="error hidden" id="error-msg"></p>
+      <button id="refresh-btn" class="secondary">Refresh</button>
+    </section>
+  </main>
+<script>
+async function checkQuota() {
+  const errEl = document.getElementById('error-msg');
+  errEl.classList.add('hidden');
+  setStatus('loading', 'Mengecek…');
+  try {
+    const res = await fetch('/api/stats');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    render(data);
+    setStatus('ok', 'OK');
+  } catch (err) {
+    setStatus('error', 'Gagal');
+    errEl.textContent = `Error: ${err.message}. Cek server / .env.`;
+    errEl.classList.remove('hidden');
+  }
+}
+
+function setStatus(type, text) {
+  const badge = document.getElementById('status-badge');
+  badge.className = `badge ${type}`;
+  badge.textContent = text;
+  badge.classList.remove('hidden');
+}
+
+function fmtTokens(n) { return Number(n).toLocaleString('id-ID'); }
+
+function render(d) {
+  const u = d.current_usage;
+  document.getElementById('key-name').textContent = d.name || '—';
+  document.getElementById('key-model').textContent = d.model || '—';
+  document.getElementById('used-label').textContent =
+    `${fmtTokens(u.tokens_used_in_current_window)} / ${fmtTokens(d.token_limit_per_5h)} token terpakai`;
+  document.getElementById('remaining-label').textContent = `${fmtTokens(u.remaining_tokens)} sisa`;
+  const pct = (u.tokens_used_in_current_window / d.token_limit_per_5h) * 100;
+  const bar = document.getElementById('progress-bar');
+  bar.style.width = `${Math.min(pct, 100)}%`;
+  bar.className = pct >= 90 ? 'danger' : pct >= 60 ? 'warn' : 'ok';
+  document.getElementById('reset-countdown').textContent = countdown(u.window_ends_at);
+  document.getElementById('expiry-date').textContent =
+    new Date(d.expiry_date).toLocaleString('id-ID');
+  document.getElementById('total-requests').textContent = fmtTokens(d.total_requests);
+  document.getElementById('last-used').textContent =
+    new Date(d.last_used).toLocaleString('id-ID');
+}
+
+function countdown(iso) {
+  const diff = new Date(iso) - Date.now();
+  if (diff <= 0) return 'Reset sekarang';
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  const s = Math.floor((diff % 60000) / 1000);
+  return `${h}j ${m}m ${s}d`;
+}
+
+document.getElementById('refresh-btn').addEventListener('click', checkQuota);
+setInterval(checkQuota, 60000);
+checkQuota();
+</script>
+</body>
+</html>
