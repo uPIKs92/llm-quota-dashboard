@@ -21,6 +21,7 @@ if ($path === '/api/stats') {
         if (is_array($data)) {
             logDaily((int)($data['total_lifetime_tokens'] ?? 0), (int)($data['total_requests'] ?? 0));
             maybeAlertReset($data['current_usage']['window_ends_at'] ?? '');
+            maybeAlertResetNow($data['current_usage']['window_started_at'] ?? '');
             maybeAlertUsage($data);
         }
     }
@@ -67,6 +68,40 @@ function history(int $days = 14): array
     $stmt = $pdo->prepare('SELECT log_date, tokens_used, requests FROM token_daily_log WHERE log_date >= ? ORDER BY log_date ASC');
     $stmt->execute([date('Y-m-d', strtotime("-" . ($days - 1) . " days"))]);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function maybeAlertResetNow(string $windowStartedAt): void
+{
+    $env = parse_ini_file(__DIR__ . '/.env');
+    $bot = $env['TELEGRAM_BOT_TOKEN'] ?? '';
+    $chat = $env['TELEGRAM_CHAT_ID'] ?? '';
+    if (!$bot || !$chat || !$windowStartedAt) return;
+
+    $pdo = db();
+    $stmt = $pdo->query('SELECT last_window_started_at FROM alert_state WHERE id = 1');
+    $last = $stmt->fetchColumn();
+    if ($last === $windowStartedAt) return; // same window, nothing new
+
+    // first ever poll (column NULL) — baseline, don't alert
+    if ($last === null || $last === false) {
+        $upd = $pdo->prepare('UPDATE alert_state SET last_window_started_at = ? WHERE id = 1');
+        $upd->execute([$windowStartedAt]);
+        return;
+    }
+
+    $start = strtotime($windowStartedAt);
+    $lastTs = strtotime($last);
+    if ($start === false || $lastTs === false) return;
+
+    $elapsedMin = (int)((time() - $start) / 60);
+    $text = "✅ *Quota GLM sudah reset*\\n"
+        . "Window baru dimulai: " . date('H:i', $start) . " WIB\\n"
+        . "Terdeteksi " . $elapsedMin . " menit setelah reset";
+
+    if (tgSend($text)) {
+        $upd = $pdo->prepare('UPDATE alert_state SET last_window_started_at = ? WHERE id = 1');
+        $upd->execute([$windowStartedAt]);
+    }
 }
 
 /**
