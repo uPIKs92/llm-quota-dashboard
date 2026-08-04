@@ -13,6 +13,12 @@ import { Progress } from "@/components/ui/progress"
 import { useTheme } from "./theme"
 import { Moon, Sun } from "lucide-react"
 
+interface HistoryDay {
+  log_date: string
+  tokens_used: number
+  requests: number
+}
+
 interface QuotaData {
   name: string
   model: string
@@ -34,6 +40,12 @@ function fmtTokens(n: number) {
   return n.toLocaleString("id-ID")
 }
 
+function fmtShort(n: number) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "jt"
+  if (n >= 1_000) return (n / 1_000).toFixed(0) + "rb"
+  return String(n)
+}
+
 function countdown(iso: string) {
   const diff = new Date(iso).getTime() - Date.now()
   if (diff <= 0) return "00:00:00"
@@ -46,8 +58,19 @@ function countdown(iso: string) {
 export default function App() {
   const { theme, toggle } = useTheme()
   const [data, setData] = useState<QuotaData | null>(null)
+  const [history, setHistory] = useState<HistoryDay[]>([])
   const [status, setStatus] = useState<Status>("loading")
   const [error, setError] = useState("")
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/history")
+      if (!res.ok) return
+      setHistory(await res.json())
+    } catch {
+      /* chart is optional; don't fail the page on it */
+    }
+  }, [])
 
   const checkQuota = useCallback(async () => {
     setStatus("loading")
@@ -66,9 +89,13 @@ export default function App() {
 
   useEffect(() => {
     checkQuota()
-    const id = setInterval(checkQuota, 60000)
+    loadHistory()
+    const id = setInterval(() => {
+      checkQuota()
+      loadHistory()
+    }, 60000)
     return () => clearInterval(id)
-  }, [checkQuota])
+  }, [checkQuota, loadHistory])
 
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -82,6 +109,11 @@ export default function App() {
   const barColor = pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : "bg-emerald-500"
   const badgeVariant =
     status === "ok" ? "default" : status === "error" ? "destructive" : "secondary"
+
+  const today = new Date().toISOString().slice(0, 10)
+  const todayTokens =
+    history.find(d => d.log_date === today)?.tokens_used ?? 0
+  const max = Math.max(1, ...history.map(d => d.tokens_used))
 
   return (
     <main className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -162,11 +194,47 @@ export default function App() {
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Dipakai hari ini
+                  </p>
+                  <p className="mt-1 font-semibold tabular-nums">
+                    {fmtTokens(todayTokens)} token
+                  </p>
+                </div>
+                <div className="rounded-lg bg-muted/50 p-3">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
                     Last used
                   </p>
                   <p className="mt-1 font-semibold">
                     {new Date(data.last_used).toLocaleString("id-ID")}
                   </p>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-muted/50 p-3">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Pemakaian harian (7 hari)
+                </p>
+                <div className="mt-3 flex h-28 items-end gap-1.5">
+                  {history.length === 0 ? (
+                    <span className="text-xs text-muted-foreground">
+                      Belum ada data
+                    </span>
+                  ) : (
+                    history.slice(-7).map(d => (
+                      <div key={d.log_date} className="flex h-full flex-1 flex-col items-center gap-1">
+                        <div className="flex w-full flex-1 items-end">
+                          <div
+                            className={`w-full rounded-t ${d.log_date === today ? "bg-primary" : "bg-muted-foreground/40"} `}
+                            style={{ height: `${Math.max((d.tokens_used / max) * 100, 4)}%` }}
+                            title={`${fmtShort(d.tokens_used)} token · ${fmtTokens(d.requests)} req`}
+                          />
+                        </div>
+                        <span className="text-[10px] text-muted-foreground">
+                          {new Date(d.log_date).toLocaleDateString("id-ID", { weekday: "short" })}
+                        </span>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             </>
