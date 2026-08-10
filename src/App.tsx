@@ -22,27 +22,27 @@ interface HistoryDay {
 interface QuotaData {
   name: string
   model: string
-  token_limit_per_5h: number
-  expiry_date: string
-  last_used: string
-  total_requests: number
-  is_expired: boolean
-  current_usage: {
-    tokens_used_in_current_window: number
-    window_ends_at: string
-    remaining_tokens: number
-  }
+  limit: number
+  used: number
+  remaining: number
+  windowStart: string
+  windowEnd: string
+  totalRequests: number
+  totalLifetime: number
+  isExpired: boolean
+  expiryDate: string
+  lastUsed: string
 }
 
 type Status = "ok" | "error" | "loading"
 
 function fmtTokens(n: number) {
-  return n.toLocaleString("id-ID")
+  return n.toLocaleString("en-US")
 }
 
 function fmtShort(n: number) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "jt"
-  if (n >= 1_000) return (n / 1_000).toFixed(0) + "rb"
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M"
+  if (n >= 1_000) return (n / 1_000).toFixed(0) + "K"
   return String(n)
 }
 
@@ -65,10 +65,22 @@ function countdown(iso: string) {
 
 export default function App() {
   const { theme, toggle } = useTheme()
+  const [appName, setAppName] = useState("LLM Quota")
   const [data, setData] = useState<QuotaData | null>(null)
   const [history, setHistory] = useState<HistoryDay[]>([])
   const [status, setStatus] = useState<Status>("loading")
   const [error, setError] = useState("")
+
+  const loadConfig = useCallback(async () => {
+    try {
+      const res = await fetch("/api/config")
+      if (!res.ok) return
+      const json = await res.json()
+      if (json.appName) setAppName(json.appName)
+    } catch {
+      /* title is cosmetic; fall back to default */
+    }
+  }, [])
 
   const loadHistory = useCallback(async () => {
     try {
@@ -91,11 +103,12 @@ export default function App() {
       setStatus("ok")
     } catch (err) {
       setStatus("error")
-      setError(err instanceof Error ? err.message : "Gagal memuat data")
+      setError(err instanceof Error ? err.message : "Failed to load data")
     }
   }, [])
 
   useEffect(() => {
+    loadConfig()
     checkQuota()
     loadHistory()
     const id = setInterval(() => {
@@ -103,7 +116,7 @@ export default function App() {
       loadHistory()
     }, 60000)
     return () => clearInterval(id)
-  }, [checkQuota, loadHistory])
+  }, [checkQuota, loadHistory, loadConfig])
 
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -111,9 +124,7 @@ export default function App() {
     return () => clearInterval(id)
   }, [])
 
-  const pct = data
-    ? (data.current_usage.tokens_used_in_current_window / data.token_limit_per_5h) * 100
-    : 0
+  const pct = data && data.limit > 0 ? (data.used / data.limit) * 100 : 0
   const barColor = pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : pct >= 30 ? "bg-yellow-400" : "bg-emerald-500"
   const badgeVariant =
     status === "ok" ? "default" : status === "error" ? "destructive" : "secondary"
@@ -128,25 +139,25 @@ export default function App() {
       <Card className="w-full max-w-md">
         <CardHeader className="flex flex-row items-start justify-between gap-4">
           <div>
-            <CardTitle className="text-xl">GLM Quota</CardTitle>
+            <CardTitle className="text-xl">{appName}</CardTitle>
             <CardDescription>
               {data
                 ? `${data.name} · ${data.model}`
                 : status === "error"
-                  ? "Gagal memuat"
-                  : "Memuat…"}
+                  ? "Failed to load"
+                  : "Loading…"}
             </CardDescription>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant={badgeVariant}>
-              {status === "loading" ? "Mengecek…" : status === "ok" ? "OK" : "Gagal"}
+              {status === "loading" ? "Checking…" : status === "ok" ? "OK" : "Failed"}
             </Badge>
             <Button
               variant="outline"
               size="icon"
               className="h-7 w-7"
               onClick={toggle}
-              aria-label={theme === "dark" ? "Mode terang" : "Mode gelap"}
+              aria-label={theme === "dark" ? "Light mode" : "Dark mode"}
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
@@ -162,15 +173,15 @@ export default function App() {
                   className="h-3.5"
                   indicatorClassName={barColor}
                 >
-                  <span className="sr-only">Sisa token: {pct.toFixed(0)}%</span>
+                  <span className="sr-only">Tokens left: {pct.toFixed(0)}%</span>
                 </Progress>
                 <div className="flex justify-between text-sm text-muted-foreground">
                   <span>
-                    {fmtTokens(data.current_usage.tokens_used_in_current_window)} /{" "}
-                    {fmtTokens(data.token_limit_per_5h)} token terpakai
+                    {fmtTokens(data.used)} /{" "}
+                    {fmtTokens(data.limit)} tokens used
                   </span>
                   <span className="font-medium text-foreground">
-                    {fmtTokens(data.current_usage.remaining_tokens)} sisa
+                    {fmtTokens(data.remaining)} left
                   </span>
                 </div>
               </div>
@@ -181,31 +192,33 @@ export default function App() {
                     Reset window
                   </p>
                   <p className="mt-1 font-semibold tabular-nums whitespace-nowrap">
-                    {countdown(data.current_usage.window_ends_at)}
+                    {countdown(data.windowEnd)}
                   </p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Expired
+                    Expires
                   </p>
                   <p className="mt-1 font-semibold">
-                    {data.is_expired
-                      ? "Ya"
-                      : new Date(data.expiry_date).toLocaleDateString("id-ID")}
+                    {data.isExpired
+                      ? "Yes"
+                      : data.expiryDate
+                        ? new Date(data.expiryDate).toLocaleDateString("en-US")
+                        : "—"}
                   </p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
                     Total requests
                   </p>
-                  <p className="mt-1 font-semibold">{fmtTokens(data.total_requests)}</p>
+                  <p className="mt-1 font-semibold">{fmtTokens(data.totalRequests)}</p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Dipakai hari ini
+                    Used today
                   </p>
                   <p className="mt-1 font-semibold tabular-nums">
-                    {fmtTokens(todayTokens)} token
+                    {fmtTokens(todayTokens)} tokens
                   </p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
@@ -213,19 +226,19 @@ export default function App() {
                     Last used
                   </p>
                   <p className="mt-1 font-semibold">
-                    {new Date(data.last_used).toLocaleString("id-ID")}
+                    {data.lastUsed ? new Date(data.lastUsed).toLocaleString("en-US") : "—"}
                   </p>
                 </div>
               </div>
 
               <div className="rounded-lg bg-muted/50 p-3">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Pemakaian harian (7 hari)
+                  Daily usage (7 days)
                 </p>
                 <div className="mt-3 flex h-28 items-end gap-1.5">
                   {history.length === 0 ? (
                     <span className="text-xs text-muted-foreground">
-                      Belum ada data
+                      No data yet
                     </span>
                   ) : (
                     history.slice(-7).map(d => (
@@ -234,11 +247,11 @@ export default function App() {
                           <div
                             className={`w-full rounded-t ${d.log_date === today ? "bg-primary" : "bg-muted-foreground/40"} `}
                             style={{ height: `${Math.max((d.tokens_used / max) * 100, 4)}%` }}
-                            title={`${fmtShort(d.tokens_used)} token · ${fmtTokens(d.requests)} req`}
+                            title={`${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`}
                           />
                         </div>
                         <span className="text-[10px] text-muted-foreground">
-                          {new Date(d.log_date).toLocaleDateString("id-ID", { weekday: "short" })}
+                          {new Date(d.log_date).toLocaleDateString("en-US", { weekday: "short" })}
                         </span>
                       </div>
                     ))
@@ -247,7 +260,7 @@ export default function App() {
               </div>
             </>
           ) : (
-            <p className="text-sm text-muted-foreground">{error || "Mengambil data…"}</p>
+            <p className="text-sm text-muted-foreground">{error || "Fetching data…"}</p>
           )}
         </CardContent>
 

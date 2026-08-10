@@ -1,7 +1,9 @@
 {
-  "name": "scaffold",
+  "name": "llm-quota-dashboard",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Realtime quota/usage dashboard for any LLM API, with daily history, Telegram alerts, and a Telegram bot.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
