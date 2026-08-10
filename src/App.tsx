@@ -46,8 +46,16 @@ function fmtShort(n: number) {
   return String(n)
 }
 
+function parseUTC(iso: string): number {
+  // If the string has no timezone offset, treat it as UTC
+  if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
+    return new Date(iso + "Z").getTime()
+  }
+  return new Date(iso).getTime()
+}
+
 function countdown(iso: string) {
-  const diff = new Date(iso).getTime() - Date.now()
+  const diff = parseUTC(iso) - Date.now()
   if (diff <= 0) return "00:00:00"
   const h = Math.floor(diff / 3600000)
   const m = Math.floor((diff % 3600000) / 60000)
@@ -106,7 +114,7 @@ export default function App() {
   const pct = data
     ? (data.current_usage.tokens_used_in_current_window / data.token_limit_per_5h) * 100
     : 0
-  const barColor = pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : "bg-emerald-500"
+  const barColor = pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : pct >= 30 ? "bg-yellow-400" : "bg-emerald-500"
   const badgeVariant =
     status === "ok" ? "default" : status === "error" ? "destructive" : "secondary"
 
