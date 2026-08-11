@@ -10,6 +10,8 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
+import { ResetWindowBar } from "@/components/reset-window-bar"
+import { cn } from "@/lib/utils"
 import { useTheme } from "./theme"
 import { Moon, Sun } from "lucide-react"
 
@@ -46,22 +48,6 @@ function fmtShort(n: number) {
   return String(n)
 }
 
-function parseUTC(iso: string): number {
-  // If the string has no timezone offset, treat it as UTC
-  if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
-    return new Date(iso + "Z").getTime()
-  }
-  return new Date(iso).getTime()
-}
-
-function countdown(iso: string) {
-  const diff = parseUTC(iso) - Date.now()
-  if (diff <= 0) return "00:00:00"
-  const h = Math.floor(diff / 3600000)
-  const m = Math.floor((diff % 3600000) / 60000)
-  const s = Math.floor((diff % 60000) / 1000)
-  return [h, m, s].map(n => String(n).padStart(2, "0")).join(":")
-}
 
 export default function App() {
   const { theme, toggle } = useTheme()
@@ -125,7 +111,20 @@ export default function App() {
   }, [])
 
   const pct = data && data.limit > 0 ? (data.used / data.limit) * 100 : 0
-  const barColor = pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : pct >= 30 ? "bg-yellow-400" : "bg-emerald-500"
+  // Tier model mirrors ResetWindowBar: low (<70) / mid (70-89) / high (>=90).
+  const tier = pct >= 90 ? "high" : pct >= 70 ? "mid" : "low"
+  const quotaIndicatorClass =
+    tier === "high"
+      ? "quota-tier-high quota-tier-high-glow"
+      : tier === "mid"
+        ? "quota-tier-mid"
+        : "quota-tier-low"
+  const pctColor =
+    tier === "high"
+      ? "text-tier-high"
+      : tier === "mid"
+        ? "text-tier-mid"
+        : "text-tier-low"
   const badgeVariant =
     status === "ok" ? "default" : status === "error" ? "destructive" : "secondary"
 
@@ -168,17 +167,24 @@ export default function App() {
           {data ? (
             <>
               <div className="flex flex-col gap-2">
-                <Progress
-                  value={Math.min(pct, 100)}
-                  className="h-3.5"
-                  indicatorClassName={barColor}
-                >
-                  <span className="sr-only">Tokens left: {pct.toFixed(0)}%</span>
-                </Progress>
+                <div className="quota-bar relative">
+                  <Progress
+                    value={Math.min(pct, 100)}
+                    indicatorClassName={quotaIndicatorClass}
+                  >
+                    <span className="sr-only">Tokens used: {pct.toFixed(0)}%</span>
+                  </Progress>
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs font-bold tabular-nums text-white mix-blend-difference">
+                    {pct.toFixed(0)}% used
+                  </span>
+                </div>
                 <div className="flex justify-between text-sm text-muted-foreground">
                   <span>
                     {fmtTokens(data.used)} /{" "}
-                    {fmtTokens(data.limit)} tokens used
+                    {fmtTokens(data.limit)} tokens ·{" "}
+                    <span className={cn("font-semibold tabular-nums", pctColor)}>
+                      {pct.toFixed(0)}%
+                    </span>
                   </span>
                   <span className="font-medium text-foreground">
                     {fmtTokens(data.remaining)} left
@@ -186,15 +192,12 @@ export default function App() {
                 </div>
               </div>
 
+              <ResetWindowBar
+                windowStart={data.windowStart}
+                windowEnd={data.windowEnd}
+              />
+
               <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg bg-muted/50 p-3">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Reset window
-                  </p>
-                  <p className="mt-1 font-semibold tabular-nums whitespace-nowrap">
-                    {countdown(data.windowEnd)}
-                  </p>
-                </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
                     Expires
