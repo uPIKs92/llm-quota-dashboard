@@ -34,6 +34,7 @@ interface QuotaData {
   isExpired: boolean
   expiryDate: string
   lastUsed: string
+  tpm: number
 }
 
 type Status = "ok" | "error" | "loading"
@@ -224,6 +225,14 @@ export default function App() {
                     {fmtTokens(todayTokens)} tokens
                   </p>
                 </div>
+                <div className="rounded-lg bg-muted/50 p-3" title="last 60s">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Tokens/min
+                  </p>
+                  <p className="mt-1 font-semibold tabular-nums">
+                    {fmtShort(data.tpm)} tokens
+                  </p>
+                </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">
                     Last used
@@ -236,21 +245,21 @@ export default function App() {
 
               <div className="rounded-lg bg-muted/50 p-3">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Daily usage (7 days)
+                  Daily usage (30 days)
                 </p>
-                <div className="mt-3 flex h-28 items-end gap-1.5">
+                <div className="mt-3 flex h-28 items-end gap-0.5">
                   {history.length === 0 ? (
                     <span className="text-xs text-muted-foreground">
                       No data yet
                     </span>
                   ) : (
-                    history.slice(-7).map(d => (
+                    history.map(d => (
                       <div key={d.log_date} className="flex h-full flex-1 flex-col items-center gap-1">
                         <div className="flex w-full flex-1 items-end">
                           <div
                             className={`w-full rounded-t ${d.log_date === today ? "bg-primary" : "bg-muted-foreground/40"} `}
                             style={{ height: `${Math.max((d.tokens_used / max) * 100, 4)}%` }}
-                            title={`${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`}
+                            title={`${new Date(d.log_date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} · ${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`}
                           />
                         </div>
                         <span className="text-[10px] text-muted-foreground">

@@ -195,14 +195,16 @@ function pollQuota(bool $fireAlerts = false): array
         if (is_array($data)) {
             $q = normalizeQuota($data);
             logDaily($q['totalLifetime'], $q['totalRequests']);
-            // Alerts fire only from the cron poller (fireAlerts=true), never from
-            // the browser-driven /api/stats route — eliminates races between
-            // concurrent cron + dashboard polls that caused duplicate Telegram msgs.
+            // Alerts + TPM logging fire only from the cron poller (fireAlerts=true),
+            // never from the browser-driven /api/stats route — eliminates races
+            // between concurrent cron + dashboard polls that caused duplicate msgs.
             if ($fireAlerts) {
+                logTpm($q['totalLifetime']); // computes + stores current_tpm
                 maybeAlertReset($q['windowEnd']);
                 maybeAlertResetNow($q['windowStart'], $q['windowEnd']);
                 maybeAlertUsage($q);
             }
+            $q['tpm'] = readTpm();           // stored value; fresh if cron, last cron value if dashboard
             $body = json_encode($q);
         }
     }
@@ -230,7 +232,7 @@ function logDaily(int $lifetimeTokens, int $requests): void
     }
 }
 
-function history(int $days = 14): array
+function history(int $days = 30): array
 {
     $pdo = db();
     $stmt = $pdo->prepare('SELECT log_date, tokens_used, requests FROM token_daily_log WHERE log_date >= ? ORDER BY log_date ASC');
@@ -238,71 +240,149 @@ function history(int $days = 14): array
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
+/**
+ * Log the current cumulative lifetime-token count keyed by minute, derive the
+ * tokens-per-minute rate (delta vs the previous minute), and store it in
+ * alert_state.current_tpm for display. Called only by the cron poller, so there
+ * is a single writer and one data point per minute. Rows older than 24h are
+ * pruned to bound growth. Returns the computed TPM (0 on the first-ever poll).
+ */
+function logTpm(int $lifetimeTokens): int
+{
+    $pdo = db();
+    $minute = date('Y-m-d H:i:00');                 // current minute, truncated
+
+    // Previous minute's lifetime — the baseline for the per-minute delta.
+    $stmt = $pdo->prepare('SELECT lifetime_tokens FROM token_minute_log WHERE ts_minute = ?');
+    $stmt->execute([date('Y-m-d H:i:00', strtotime('-1 minute'))]);
+    $prev = $stmt->fetchColumn();
+    $tpm = ($prev !== false) ? max($lifetimeTokens - (int)$prev, 0) : 0;
+
+    // Upsert current minute (latest lifetime wins for same-minute re-polls).
+    $up = $pdo->prepare(
+        'INSERT INTO token_minute_log (ts_minute, lifetime_tokens) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE lifetime_tokens = VALUES(lifetime_tokens)'
+    );
+    $up->execute([$minute, $lifetimeTokens]);
+
+    // Prune rows older than 24h.
+    $prune = $pdo->prepare('DELETE FROM token_minute_log WHERE ts_minute < ?');
+    $prune->execute([date('Y-m-d H:i:00', strtotime('-24 hours'))]);
+
+    $upd = $pdo->prepare('UPDATE alert_state SET current_tpm = ? WHERE id = 1');
+    $upd->execute([$tpm]);
+
+    return $tpm;
+}
+
+/**
+ * Read the tokens-per-minute rate for display. Returns the live value from
+ * current_tpm when there is consumption this minute; otherwise falls back to the
+ * most recent minute that had consumption (last non-zero), so the card does not
+ * drop to 0 whenever the API is idle. Returns 0 only when no consumption has ever
+ * been recorded.
+ */
+function readTpm(): int
+{
+    $pdo = db();
+    $stmt = $pdo->query('SELECT current_tpm FROM alert_state WHERE id = 1');
+    $raw = $stmt->fetchColumn();
+    $current = ($raw === null || $raw === false) ? 0 : (int)$raw;
+    if ($current > 0) return $current;
+
+    // Idle — find the most recent minute whose lifetime increased over its
+    // predecessor (i.e. the last minute with real consumption).
+    $stmt = $pdo->query(
+        'SELECT m1.lifetime_tokens - m0.lifetime_tokens AS tpm
+         FROM token_minute_log m1
+         JOIN token_minute_log m0
+           ON m0.ts_minute = m1.ts_minute - INTERVAL 1 MINUTE
+         WHERE m1.lifetime_tokens > m0.lifetime_tokens
+         ORDER BY m1.ts_minute DESC
+         LIMIT 1'
+    );
+    $last = $stmt->fetchColumn();
+    return ($last === null || $last === false) ? 0 : (int)$last;
+}
+
 /* --------------------------------- alerts --------------------------------- */
 
 /**
- * Alert once shortly after a quota window resets. Throttled so at most one ✅
- * fires per window — immune to upstream timestamp drift and to concurrent polls
- * (cron vs dashboard). The alert_state.last_window_started_at column is repurposed
- * to store the wall-clock time (unix seconds, as a string) of the last ✅ send.
+ * Alert once after a quota window ends. Fires on a time schedule derived from the
+ * last known window end — so ✅ still fires even when the API is idle and the
+ * upstream never reports a new windowStart. Immune to upstream timestamp drift
+ * and to concurrent polls (cron vs dashboard).
  *
- * Throttle = window duration minus 1 hour (min 1 hour), so a second ✅ can only
- * fire after the current window is nearly over / a genuinely new window began.
+ * alert_state.known_window_end stores the last authoritative window-end (unix
+ * seconds, as a string). It is reconciled from upstream whenever upstream reports
+ * an end that is newer than what we have. On each fire, it is projected forward
+ * by one window duration (skipping any catch-up windows) so only one ✅ sends per
+ * genuine reset, with zero dependence on the API being used.
  */
 function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
 {
     $e = env();
     $bot = $e['TELEGRAM_BOT_TOKEN'] ?? '';
     $chat = $e['TELEGRAM_CHAT_ID'] ?? '';
-    if (!$bot || !$chat || !$windowStartedAt) return;
+    if (!$bot || !$chat) return;
 
-    $start = strtotime($windowStartedAt);
-    $end = $windowEndsAt ? strtotime($windowEndsAt) : false;
-    if ($start === false) return;
+    $start = $windowStartedAt !== '' ? strtotime($windowStartedAt) : false;
+    $end = $windowEndsAt !== '' ? strtotime($windowEndsAt) : false;
 
-    // Window duration (e.g. 5h). Fall back to 5h if end unknown.
-    $duration = ($end && $end > $start) ? ($end - $start) : 5 * 3600;
-    $throttle = max($duration - 3600, 3600); // min 1h between ✅ sends
-
-    $now = time();
     $pdo = db();
 
-    // Read last send time. Column may still hold a legacy ISO timestamp from an
-    // older deploy; coerce defensively to unix seconds.
-    $stmt = $pdo->query('SELECT last_window_started_at FROM alert_state WHERE id = 1');
+    // --- reconcile: upstream is authoritative whenever it reports a newer end ---
+    $stmt = $pdo->query('SELECT known_window_end FROM alert_state WHERE id = 1');
     $raw = $stmt->fetchColumn();
-    $lastSend = 0;
+    $knownEnd = 0;
     if ($raw !== null && $raw !== false && $raw !== '') {
         $s = (string)$raw;
-        // Stored value is either a unix-ts string (all digits) or a legacy ISO
-        // timestamp. ctype_digit distinguishes them; (int)strtotime coerces ISO
-        // (returns 0 on parse failure).
-        $lastSend = ctype_digit($s) ? (int)$s : (int)strtotime($s);
+        $knownEnd = ctype_digit($s) ? (int)$s : (int)strtotime($s);
     }
 
-    if ($now - $lastSend < $throttle) return;       // throttled — too soon since last ✅
+    if ($end && $end > $knownEnd) {
+        $prevBind = ($raw === null || $raw === false) ? null : (string)$raw;
+        $claim = $pdo->prepare(
+            'UPDATE alert_state SET known_window_end = ?
+             WHERE id = 1 AND known_window_end <=> ?'
+        );
+        $claim->execute([(string)$end, $prevBind]);
+        $knownEnd = $end;
+    }
 
-    // Race-safe claim via null-safe conditional UPDATE: only the poll that moves
-    // the value from $raw to $now wins (rowCount === 1). Concurrent polls then
-    // see the new value and bail on the next read.
-    $prevBind = ($raw === null || $raw === false) ? null : (string)$raw;
+    if ($knownEnd === 0) return; // nothing known yet — wait for the first real poll
+
+    // Window duration (e.g. 5h), from reported start/end with a 5h fallback.
+    $duration = ($start && $end && $end > $start) ? ($end - $start) : 5 * 3600;
+    $duration = max($duration, 3600); // sanity floor 1h
+
+    // --- fire when the current wall-clock time has passed the known window end ---
+    if (time() < $knownEnd) return;
+
+    // Race-safe claim: project known_window_end forward. Skip past any catch-up
+    // windows (e.g. after downtime) so only one ✅ sends, then advance to the
+    // next future boundary. Conditional UPDATE => only one poll wins the race.
+    $nextEnd = $knownEnd + $duration;
+    while ($nextEnd <= time()) {
+        $nextEnd += $duration;
+    }
+    $prevBind = (string)$knownEnd;
     $claim = $pdo->prepare(
-        'UPDATE alert_state SET last_window_started_at = ?
-         WHERE id = 1 AND last_window_started_at <=> ?'
+        'UPDATE alert_state SET known_window_end = ?
+         WHERE id = 1 AND known_window_end <=> ?'
     );
-    $claim->execute([(string)$now, $prevBind]);
+    $claim->execute([(string)$nextEnd, $prevBind]);
     if ($claim->rowCount() !== 1) return;           // lost the race — another poll won
 
-    $startFmt = (new DateTime('@' . $start))->setTimezone(tz())->format('H:i');
-    $elapsedMin = (int)max(($now - $start) / 60, 0);
+    $endFmt = (new DateTime('@' . $knownEnd))->setTimezone(tz())->format('H:i');
+    $elapsedMin = (int)max((time() - $knownEnd) / 60, 0);
     $text = "✅ *" . appName() . " quota reset*\n"
-        . "New window started: {$startFmt} " . tzAbbr() . "\n"
-        . "Detected {$elapsedMin} min after reset";
+        . "Last window ended: {$endFmt} " . tzAbbr() . "\n"
+        . "Elapsed: {$elapsedMin} min ago";
 
     if (!tgSend($text)) {
-        // Send failed — release the claim so the next poll retries. Restore the
-        // previous value rather than leaving a bogus "sent" marker.
-        $release = $pdo->prepare('UPDATE alert_state SET last_window_started_at = ? WHERE id = 1');
+        // Send failed — revert the projection so the next poll retries.
+        $release = $pdo->prepare('UPDATE alert_state SET known_window_end = ? WHERE id = 1');
         $release->execute([$prevBind]);
     }
 }
