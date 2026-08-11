@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useState } from "react"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+  ArrowClockwise,
+  CalendarBlank,
+  Clock,
+  Coins,
+  Gauge,
+  Hash,
+  MoonStars,
+  Sun,
+} from "@phosphor-icons/react"
+import { GlassCard } from "@/components/ui/glass-card"
 import { Progress } from "@/components/ui/progress"
 import { ResetWindowBar } from "@/components/reset-window-bar"
+import { StatTile } from "@/components/ui/stat-tile"
 import { cn } from "@/lib/utils"
 import { useTheme } from "./theme"
-import { Moon, Sun } from "lucide-react"
 
 interface HistoryDay {
   log_date: string
@@ -49,6 +50,48 @@ function fmtShort(n: number) {
   return String(n)
 }
 
+const TZ_JAKARTA = "Asia/Jakarta"
+
+/** Date + time, Indonesian, GMT+7. e.g. "11 Agt 2026, 14.30" */
+function fmtDateTime(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso || "—"
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: TZ_JAKARTA,
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(d)
+}
+
+/** Date only, indonesian, GMT+7. e.g. "11 Agt 2026" */
+function fmtDate(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso || "—"
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: TZ_JAKARTA,
+    dateStyle: "medium",
+  }).format(d)
+}
+
+/** Short weekday, indonesian. e.g. "Sen" */
+function fmtWeekday(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ""
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: TZ_JAKARTA,
+    weekday: "short",
+  }).format(d)
+}
+
+/** Today's date anchor in Jakarta time (YYYY-MM-DD), not UTC. */
+function todayJakarta() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ_JAKARTA,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date())
+}
 
 export default function App() {
   const { theme, toggle } = useTheme()
@@ -105,12 +148,6 @@ export default function App() {
     return () => clearInterval(id)
   }, [checkQuota, loadHistory, loadConfig])
 
-  const [, setTick] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
-
   const pct = data && data.limit > 0 ? (data.used / data.limit) * 100 : 0
   // Tier model mirrors ResetWindowBar: low (<70) / mid (70-89) / high (>=90).
   const tier = pct >= 90 ? "high" : pct >= 70 ? "mid" : "low"
@@ -126,167 +163,195 @@ export default function App() {
       : tier === "mid"
         ? "text-tier-mid"
         : "text-tier-low"
-  const badgeVariant =
-    status === "ok" ? "default" : status === "error" ? "destructive" : "secondary"
 
-  const today = new Date().toISOString().slice(0, 10)
-  const todayTokens =
-    history.find(d => d.log_date === today)?.tokens_used ?? 0
+  const today = todayJakarta()
+  const todayTokens = history.find(d => d.log_date === today)?.tokens_used ?? 0
   const max = Math.max(1, ...history.map(d => d.tokens_used))
 
-  return (
-    <main className="min-h-screen flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
-          <div>
-            <CardTitle className="text-xl">{appName}</CardTitle>
-            <CardDescription>
-              {data
-                ? `${data.name} · ${data.model}`
-                : status === "error"
-                  ? "Failed to load"
-                  : "Loading…"}
-            </CardDescription>
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge variant={badgeVariant}>
-              {status === "loading" ? "Checking…" : status === "ok" ? "OK" : "Failed"}
-            </Badge>
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-7 w-7"
-              onClick={toggle}
-              aria-label={theme === "dark" ? "Light mode" : "Dark mode"}
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </Button>
-          </div>
-        </CardHeader>
+  const statusDotColor: string =
+    status === "ok"
+      ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+      : status === "error"
+        ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]"
+        : "bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] animate-pulse"
 
-        <CardContent className="flex flex-col gap-4">
+  return (
+    <>
+      <div className="mesh-orbs" aria-hidden />
+      <div className="grain" aria-hidden />
+      <main
+        className="relative z-10 mx-auto flex min-h-[100dvh] w-full max-w-md flex-col gap-3 px-4 py-4 sm:max-w-2xl sm:gap-4"
+        style={{
+          paddingTop: "max(1rem, env(safe-area-inset-top))",
+          paddingBottom: "max(1rem, env(safe-area-inset-bottom))",
+        }}
+      >
+        {/* Floating glass pill nav */}
+        <nav className="spring mx-auto flex w-full max-w-3xl items-center justify-between gap-3 rounded-full border border-black/10 bg-black/5 px-3 py-1.5 backdrop-blur-2xl dark:border-white/10 dark:bg-white/5 sm:px-4">
+          <div className="flex min-w-0 items-center gap-2.5 pl-1">
+            <span
+              className={cn("relative inline-block size-2 shrink-0 rounded-full", statusDotColor)}
+            />
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate text-sm font-medium tracking-tight text-foreground">{appName}</span>
+              <span className="truncate text-[10px] text-muted-foreground">Auto-refresh 60s</span>
+            </div>
+            {data && (
+              <span className="hidden truncate text-xs text-muted-foreground sm:inline">· {data.model}</span>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={toggle}
+              aria-label="Toggle theme"
+              className="spring flex size-8 items-center justify-center rounded-full text-foreground/70 hover:bg-foreground/10 hover:text-foreground active:scale-[0.96]"
+            >
+              {theme === "dark" ? (
+                <Sun size={18} weight="thin" />
+              ) : (
+                <MoonStars size={18} weight="thin" />
+              )}
+            </button>
+            <button
+              onClick={checkQuota}
+              disabled={status === "loading"}
+              className="group spring flex items-center gap-2 rounded-full bg-white py-2 pl-4 pr-1.5 text-sm font-medium text-black hover:bg-white/90 active:scale-[0.98] disabled:opacity-50"
+            >
+              <span>Refresh</span>
+              <span className="flex size-6 items-center justify-center rounded-full bg-black/10 transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover:scale-105">
+                <ArrowClockwise
+                  size={14}
+                  weight="thin"
+                  className={cn(status === "loading" && "animate-spin")}
+                />
+              </span>
+            </button>
+          </div>
+        </nav>
+
+        {/* Hero quota card */}
+        <GlassCard revealDelay={0} innerClassName="p-4 sm:p-6">
           {data ? (
             <>
-              <div className="flex flex-col gap-2">
-                <div className="quota-bar relative">
-                  <Progress
-                    value={Math.min(pct, 100)}
-                    indicatorClassName={quotaIndicatorClass}
-                  >
-                    <span className="sr-only">Tokens used: {pct.toFixed(0)}%</span>
-                  </Progress>
-                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs font-bold tabular-nums text-white mix-blend-difference">
-                    {pct.toFixed(0)}% used
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm text-muted-foreground">
-                  <span>
-                    {fmtTokens(data.used)} /{" "}
-                    {fmtTokens(data.limit)} tokens ·{" "}
-                    <span className={cn("font-semibold tabular-nums", pctColor)}>
-                      {pct.toFixed(0)}%
-                    </span>
-                  </span>
-                  <span className="font-medium text-foreground">
-                    {fmtTokens(data.remaining)} left
-                  </span>
-                </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="eyebrow glass-pill inline-block rounded-full px-2.5 py-1 text-card-foreground/75">
+                  Quota
+                </span>
+                <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-card-foreground/75">
+                  <CalendarBlank size={12} weight="thin" />
+                  {data.isExpired ? "Expired" : fmtDate(data.expiryDate)}
+                </span>
               </div>
+              <p
+                className={cn(
+                  "mt-3 text-4xl font-bold tracking-tight tabular-nums text-card-foreground sm:text-5xl",
+                  pctColor,
+                )}
+              >
+                {pct.toFixed(0)}
+                <span className="text-2xl text-card-foreground/50 sm:text-3xl">%</span>
+              </p>
+              <p className="mt-1.5 text-sm text-card-foreground/60">
+                {fmtTokens(data.used)} / {fmtTokens(data.limit)} tokens
+              </p>
 
-              <ResetWindowBar
-                windowStart={data.windowStart}
-                windowEnd={data.windowEnd}
-              />
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg bg-muted/50 p-3">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Expires
-                  </p>
-                  <p className="mt-1 font-semibold">
-                    {data.isExpired
-                      ? "Yes"
-                      : data.expiryDate
-                        ? new Date(data.expiryDate).toLocaleDateString("en-US")
-                        : "—"}
-                  </p>
-                </div>
-                <div className="rounded-lg bg-muted/50 p-3">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Total requests
-                  </p>
-                  <p className="mt-1 font-semibold">{fmtTokens(data.totalRequests)}</p>
-                </div>
-                <div className="rounded-lg bg-muted/50 p-3">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Used today
-                  </p>
-                  <p className="mt-1 font-semibold tabular-nums">
-                    {fmtTokens(todayTokens)} tokens
-                  </p>
-                </div>
-                <div className="rounded-lg bg-muted/50 p-3" title="last 60s">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Tokens/min
-                  </p>
-                  <p className="mt-1 font-semibold tabular-nums">
-                    {fmtShort(data.tpm)} tokens
-                  </p>
-                </div>
-                <div className="rounded-lg bg-muted/50 p-3">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Last used
-                  </p>
-                  <p className="mt-1 font-semibold">
-                    {data.lastUsed ? new Date(data.lastUsed).toLocaleString("en-US") : "—"}
-                  </p>
-                </div>
+              <div className="quota-bar relative mt-4">
+                <Progress value={Math.min(pct, 100)} indicatorClassName={quotaIndicatorClass}>
+                  <span className="sr-only">Tokens used: {pct.toFixed(0)}%</span>
+                </Progress>
               </div>
-
-              <div className="rounded-lg bg-muted/50 p-3">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Daily usage (30 days)
-                </p>
-                <div className="mt-3 flex h-28 items-end gap-0.5">
-                  {history.length === 0 ? (
-                    <span className="text-xs text-muted-foreground">
-                      No data yet
-                    </span>
-                  ) : (
-                    history.map(d => (
-                      <div key={d.log_date} className="flex h-full flex-1 flex-col items-center gap-1">
-                        <div className="flex w-full flex-1 items-end">
-                          <div
-                            className={`w-full rounded-t ${d.log_date === today ? "bg-primary" : "bg-muted-foreground/40"} `}
-                            style={{ height: `${Math.max((d.tokens_used / max) * 100, 4)}%` }}
-                            title={`${new Date(d.log_date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} · ${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`}
-                          />
-                        </div>
-                        <span className="text-[10px] text-muted-foreground">
-                          {new Date(d.log_date).toLocaleDateString("en-US", { weekday: "short" })}
-                        </span>
-                      </div>
-                    ))
-                  )}
-                </div>
+              <div className="mt-2 flex items-center justify-between text-sm">
+                <span className="text-card-foreground/65">
+                  Used{" "}
+                  <span className={cn("font-semibold tabular-nums", pctColor)}>
+                    {pct.toFixed(0)}%
+                  </span>
+                </span>
+                <span className="font-medium tabular-nums text-card-foreground/65">
+                  {fmtTokens(data.remaining)} remaining
+                </span>
               </div>
             </>
           ) : (
-            <p className="text-sm text-muted-foreground">{error || "Fetching data…"}</p>
+            <div className="flex min-h-[120px] items-center justify-center">
+              <p className="text-sm text-card-foreground/50">{error || "Fetching data…"}</p>
+            </div>
           )}
-        </CardContent>
+        </GlassCard>
 
-        <CardFooter>
-          <Button
-            variant="outline"
-            className="w-full"
-            onClick={checkQuota}
-            disabled={status === "loading"}
-          >
-            Refresh
-          </Button>
-        </CardFooter>
-      </Card>
-    </main>
+        {/* Bento grid */}
+        {data && (
+          <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-8 md:gap-4">
+            {/* Reset window — full width */}
+            <div className="col-span-2 md:col-span-8">
+              <ResetWindowBar windowStart={data.windowStart} windowEnd={data.windowEnd} />
+            </div>
+
+            {/* Last used — wide, with Today sub-badge */}
+            <StatTile
+              className="col-span-2 md:col-span-8"
+              revealDelay={160}
+              label="Last used"
+              icon={<Clock size={16} weight="thin" />}
+              value={data.lastUsed ? fmtDateTime(data.lastUsed) : "—"}
+              badge={
+                <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-card-foreground/75">
+                  <Coins size={11} weight="thin" />
+                  {fmtTokens(todayTokens)} today
+                </span>
+              }
+            />
+
+            {/* Tokens/min — wide, with Requests sub-badge */}
+            <StatTile
+              className="col-span-2 md:col-span-8"
+              revealDelay={200}
+              label="Tokens/min"
+              icon={<Gauge size={16} weight="thin" />}
+              value={fmtShort(data.tpm)}
+              badge={
+                <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-card-foreground/75">
+                  <Hash size={11} weight="thin" />
+                  {fmtTokens(data.totalRequests)} req
+                </span>
+              }
+            />
+
+            {/* 30-day chart */}
+            <GlassCard className="col-span-2 md:col-span-8" revealDelay={240} innerClassName="p-3 sm:p-6">
+              <div className="flex items-baseline justify-between">
+                <p className="eyebrow text-card-foreground/55">Daily usage</p>
+                <p className="text-xs text-card-foreground/60 sm:text-sm">30 days</p>
+              </div>
+              <div className="mt-3 flex h-16 items-end gap-1 sm:mt-4 sm:h-24 sm:gap-1.5">
+                {history.length === 0 ? (
+                  <span className="text-sm text-card-foreground/50">No data yet</span>
+                ) : (
+                  history.map(d => (
+                    <div key={d.log_date} className="flex h-full flex-1 flex-col items-center gap-1">
+                      <div className="flex w-full flex-1 items-end">
+                        <div
+                          className={cn(
+                            "w-full rounded-full",
+                            d.log_date === today ? "bg-card-foreground" : "bg-card-foreground/25",
+                          )}
+                          style={{
+                            height: `${Math.max((d.tokens_used / max) * 100, 4)}%`,
+                          }}
+                          title={`${fmtDate(d.log_date)} · ${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`}
+                        />
+                      </div>
+                      <span className="hidden text-[10px] text-card-foreground/50 sm:inline">
+                        {fmtWeekday(d.log_date)}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </GlassCard>
+          </div>
+        )}
+      </main>
+    </>
   )
 }

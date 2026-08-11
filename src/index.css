@@ -71,33 +71,34 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
+  /* Ethereal Glass — near-OLED neutral dark (visually primary theme) */
+  --background: oklch(0.08 0 0);
+  --foreground: oklch(0.98 0 0);
 
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
+  --card: oklch(0.12 0 0);
+  --card-foreground: oklch(0.98 0 0);
 
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.12 0 0);
+  --popover-foreground: oklch(0.98 0 0);
 
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
+  --primary: oklch(0.98 0 0);
+  --primary-foreground: oklch(0.1 0 0);
 
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.18 0 0);
+  --secondary-foreground: oklch(0.98 0 0);
 
-  --muted: oklch(0.269 0 0);
+  --muted: oklch(0.16 0 0);
   --muted-foreground: oklch(0.708 0 0);
 
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --accent: oklch(0.18 0 0);
+  --accent-foreground: oklch(0.98 0 0);
 
   --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
+  --destructive-foreground: oklch(0.98 0 0);
 
-  --border: oklch(1 0 0 / 10%);
+  --border: oklch(1 0 0 / 8%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.553 0.013 58.071);
+  --ring: oklch(0.7 0.05 270);
 
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
@@ -155,7 +156,10 @@
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-lg);
-  background: var(--muted);
+  /* Always-dark dramatic strip so the colored fill + white countdown text
+     both read clearly in either theme. The reset window is a "burning"
+     hero element, not a regular muted surface. */
+  background: #1a1714;
 }
 .reset-fill {
   position: absolute;
@@ -163,12 +167,6 @@
   left: 0;
   transition: width 0.8s ease, background 0.4s ease;
   background: linear-gradient(90deg, var(--fill-low-1), var(--fill-low-2));
-}
-.reset-fill-mid {
-  background: linear-gradient(90deg, var(--fill-mid-1), var(--fill-mid-2));
-}
-.reset-fill-high {
-  background: linear-gradient(90deg, var(--fill-high-1), var(--fill-high-2));
 }
 .reset-burn {
   position: absolute;
@@ -183,12 +181,6 @@
   opacity: 0;
   transition: opacity 0.4s ease;
   pointer-events: none;
-}
-.reset-burn-mid { opacity: 0.72; animation: flicker 1.4s ease-in-out infinite alternate; }
-.reset-burn-high { opacity: 0.95; animation: flicker 0.9s ease-in-out infinite alternate; }
-.reset-glow-high {
-  box-shadow: 0 0 16px 2px var(--burn-glow), inset 0 0 12px rgba(232, 52, 28, 0.22);
-  animation: pulse-glow 1.6s ease-in-out infinite;
 }
 .reset-ember {
   position: absolute;
@@ -237,19 +229,131 @@
   50%      { box-shadow: 0 0 16px 2px var(--burn-glow); }
 }
 
-@keyframes flicker {
-  0%, 100% { opacity: 0.9; transform: translateY(0) scaleY(1); }
-  25% { opacity: 1; transform: translateY(-1px) scaleY(1.04); }
-  50% { opacity: 0.82; transform: translateY(1px) scaleY(0.97); }
-  75% { opacity: 0.96; transform: translateY(-1px) scaleY(1.02); }
-}
 @keyframes ember-rise {
   0% { transform: translateY(0) scale(1); opacity: 0.9; }
   100% { transform: translateY(-22px) scale(0.25); opacity: 0; }
 }
-@keyframes pulse-glow {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+
+/* ===== Ethereal Glass — foundation systems ===== */
+
+/* Squircle + bezel radius scale */
+:root {
+  --radius-squircle: 2rem;
+  --radius-squircle-sm: 1.5rem;
+  --bezel-pad: 0.375rem;
+}
+@media (max-width: 640px) {
+  :root { --bezel-pad: 0.25rem; --radius-squircle: 1.25rem; }
+}
+
+/* Mesh orb ambient background — fixed, behind everything */
+:root { --mesh-base: #faf6ef; --orb-1: #c4b5fd; --orb-2: #a7f3d0; }
+.dark { --mesh-base: #050505; --orb-1: #6d28d9; --orb-2: #047857; }
+.mesh-orbs {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  overflow: hidden; background: var(--mesh-base, #050505);
+}
+.mesh-orbs::before,
+.mesh-orbs::after {
+  content: ""; position: absolute; border-radius: 9999px;
+  filter: blur(80px); opacity: 0.5;
+}
+.mesh-orbs::before {
+  width: 40vw; height: 40vw; left: -10vw; top: -10vh;
+  background: radial-gradient(circle, var(--orb-1, #5b21b6) 0%, transparent 70%);
+}
+.mesh-orbs::after {
+  width: 45vw; height: 45vw; right: -12vw; bottom: -12vh;
+  background: radial-gradient(circle, var(--orb-2, #047857) 0%, transparent 70%);
+}
+
+/* Film grain overlay — above orbs, below content */
+.grain {
+  position: fixed; inset: 0; z-index: 1; pointer-events: none;
+  opacity: 0.03; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Double-bezel helper classes */
+.bezel-shell {
+  position: relative; border-radius: var(--radius-squircle);
+  background: rgba(255,255,255,0.05);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10), 0 1px 0 0 rgba(255,255,255,0.04);
+  -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
+  padding: var(--bezel-pad);
+}
+.bezel-core {
+  border-radius: calc(var(--radius-squircle) - var(--bezel-pad));
+  background: rgba(0,0,0,0.40);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.12), inset 0 0 0 1px rgba(255,255,255,0.04);
+}
+.bezel-shell-sm { border-radius: var(--radius-squircle-sm); }
+.bezel-core-sm { border-radius: calc(var(--radius-squircle-sm) - var(--bezel-pad)); }
+
+/* Light mode — smoked-glass shell + frosted core so dark card text reads.
+   Dark mode keeps the OLED glass above; cards flip surface + text via the
+   --card-foreground token (light brown / near-white) used in components. */
+:root:not(.dark) .bezel-shell {
+  background: rgba(255,255,255,0.40);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06), 0 1px 0 rgba(255,255,255,0.5);
+}
+:root:not(.dark) .bezel-core {
+  background: rgba(255,253,248,0.62);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.8), inset 0 0 0 1px rgba(0,0,0,0.04);
+}
+
+/* Reveal animation — GPU-safe transform/opacity/blur on composited layer */
+.reveal {
+  opacity: 0; transform: translateY(4rem) scale(0.985);
+  filter: blur(8px); will-change: transform, opacity, filter;
+  transition: opacity 0.9s cubic-bezier(0.32,0.72,0,1),
+              transform 0.9s cubic-bezier(0.32,0.72,0,1),
+              filter 0.9s cubic-bezier(0.32,0.72,0,1);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+.reveal[data-revealed="true"] {
+  opacity: 1; transform: none; filter: blur(0);
+}
+
+/* Global spring transition utility for interactive elements */
+.spring {
+  transition: transform 0.5s cubic-bezier(0.32,0.72,0,1),
+              background-color 0.5s cubic-bezier(0.32,0.72,0,1),
+              box-shadow 0.5s cubic-bezier(0.32,0.72,0,1);
+}
+
+/* Eyebrow tag style */
+.eyebrow {
+  font-size: 0.625rem; text-transform: uppercase;
+  letter-spacing: 0.22em; font-weight: 500;
+}
+
+/* Glass gradient pill — frosted badge with inset top highlight */
+.glass-pill {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  white-space: nowrap;
+  background: linear-gradient(
+    to bottom,
+    rgba(255,255,255,0.22) 0%,
+    rgba(255,255,255,0.06) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.28),
+    inset 0 0 0 1px rgba(255,255,255,0.12);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+:root:not(.dark) .glass-pill {
+  background: linear-gradient(
+    to bottom,
+    rgba(255,255,255,0.55) 0%,
+    rgba(255,255,255,0.25) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.7),
+    inset 0 0 0 1px rgba(255,255,255,0.4);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -262,4 +366,8 @@
   }
   .reset-burn-mid { opacity: 0.5; }
   .reset-burn-high { opacity: 0.7; }
+  .reveal {
+    opacity: 1; transform: none; filter: none;
+    transition: none !important;
+  }
 }
