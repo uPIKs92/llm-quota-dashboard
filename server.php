@@ -171,7 +171,7 @@ function fetchUpstream(): ?array
  *
  * @return array{code:int, body:string}
  */
-function pollQuota(): array
+function pollQuota(bool $fireAlerts = false): array
 {
     if (!upstreamUrl()) {
         return ['code' => 500, 'body' => '{"error":"UPSTREAM_URL not set"}'];
@@ -195,9 +195,14 @@ function pollQuota(): array
         if (is_array($data)) {
             $q = normalizeQuota($data);
             logDaily($q['totalLifetime'], $q['totalRequests']);
-            maybeAlertReset($q['windowEnd']);
-            maybeAlertResetNow($q['windowStart']);
-            maybeAlertUsage($q);
+            // Alerts fire only from the cron poller (fireAlerts=true), never from
+            // the browser-driven /api/stats route — eliminates races between
+            // concurrent cron + dashboard polls that caused duplicate Telegram msgs.
+            if ($fireAlerts) {
+                maybeAlertReset($q['windowEnd']);
+                maybeAlertResetNow($q['windowStart'], $q['windowEnd']);
+                maybeAlertUsage($q);
+            }
             $body = json_encode($q);
         }
     }
@@ -235,46 +240,78 @@ function history(int $days = 14): array
 
 /* --------------------------------- alerts --------------------------------- */
 
-/** Alert once when a new quota window is detected (reset happened). */
-function maybeAlertResetNow(string $windowStartedAt): void
+/**
+ * Alert once shortly after a quota window resets. Throttled so at most one ✅
+ * fires per window — immune to upstream timestamp drift and to concurrent polls
+ * (cron vs dashboard). The alert_state.last_window_started_at column is repurposed
+ * to store the wall-clock time (unix seconds, as a string) of the last ✅ send.
+ *
+ * Throttle = window duration minus 1 hour (min 1 hour), so a second ✅ can only
+ * fire after the current window is nearly over / a genuinely new window began.
+ */
+function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
 {
     $e = env();
     $bot = $e['TELEGRAM_BOT_TOKEN'] ?? '';
     $chat = $e['TELEGRAM_CHAT_ID'] ?? '';
     if (!$bot || !$chat || !$windowStartedAt) return;
 
-    $pdo = db();
-    $stmt = $pdo->query('SELECT last_window_started_at FROM alert_state WHERE id = 1');
-    $last = $stmt->fetchColumn();
-    if ($last === $windowStartedAt) return; // same window, nothing new
+    $start = strtotime($windowStartedAt);
+    $end = $windowEndsAt ? strtotime($windowEndsAt) : false;
+    if ($start === false) return;
 
-    // first ever poll (column NULL) — baseline, don't alert
-    if ($last === null || $last === false) {
-        $upd = $pdo->prepare('UPDATE alert_state SET last_window_started_at = ? WHERE id = 1');
-        $upd->execute([$windowStartedAt]);
-        return;
+    // Window duration (e.g. 5h). Fall back to 5h if end unknown.
+    $duration = ($end && $end > $start) ? ($end - $start) : 5 * 3600;
+    $throttle = max($duration - 3600, 3600); // min 1h between ✅ sends
+
+    $now = time();
+    $pdo = db();
+
+    // Read last send time. Column may still hold a legacy ISO timestamp from an
+    // older deploy; coerce defensively to unix seconds.
+    $stmt = $pdo->query('SELECT last_window_started_at FROM alert_state WHERE id = 1');
+    $raw = $stmt->fetchColumn();
+    $lastSend = 0;
+    if ($raw !== null && $raw !== false && $raw !== '') {
+        $s = (string)$raw;
+        // Stored value is either a unix-ts string (all digits) or a legacy ISO
+        // timestamp. ctype_digit distinguishes them; (int)strtotime coerces ISO
+        // (returns 0 on parse failure).
+        $lastSend = ctype_digit($s) ? (int)$s : (int)strtotime($s);
     }
 
-    $start = strtotime($windowStartedAt);
-    $lastTs = strtotime($last);
-    if ($start === false || $lastTs === false) return;
-    if ($start <= $lastTs) return; // not a newer window than what we already logged
+    if ($now - $lastSend < $throttle) return;       // throttled — too soon since last ✅
+
+    // Race-safe claim via null-safe conditional UPDATE: only the poll that moves
+    // the value from $raw to $now wins (rowCount === 1). Concurrent polls then
+    // see the new value and bail on the next read.
+    $prevBind = ($raw === null || $raw === false) ? null : (string)$raw;
+    $claim = $pdo->prepare(
+        'UPDATE alert_state SET last_window_started_at = ?
+         WHERE id = 1 AND last_window_started_at <=> ?'
+    );
+    $claim->execute([(string)$now, $prevBind]);
+    if ($claim->rowCount() !== 1) return;           // lost the race — another poll won
 
     $startFmt = (new DateTime('@' . $start))->setTimezone(tz())->format('H:i');
-    $elapsedMin = (int)max((time() - $start) / 60, 0);
+    $elapsedMin = (int)max(($now - $start) / 60, 0);
     $text = "✅ *" . appName() . " quota reset*\n"
         . "New window started: {$startFmt} " . tzAbbr() . "\n"
         . "Detected {$elapsedMin} min after reset";
 
-    if (tgSend($text)) {
-        $upd = $pdo->prepare('UPDATE alert_state SET last_window_started_at = ? WHERE id = 1');
-        $upd->execute([$windowStartedAt]);
+    if (!tgSend($text)) {
+        // Send failed — release the claim so the next poll retries. Restore the
+        // previous value rather than leaving a bogus "sent" marker.
+        $release = $pdo->prepare('UPDATE alert_state SET last_window_started_at = ? WHERE id = 1');
+        $release->execute([$prevBind]);
     }
 }
 
 /**
  * Alert via Telegram when the quota window is about to reset.
- * Sends once per window (dedup key = window_ends_at timestamp).
+ * Sends once per window (dedup key = window_ends_at unix ts). Dedup compares by
+ * unix timestamp, not raw string, so format drift (millis, +00:00 vs Z) can't
+ * bypass it and cause repeat ⚠️ sends. Race-safe conditional UPDATE claim.
  */
 function maybeAlertReset(string $windowEndsAt): void
 {
@@ -291,22 +328,39 @@ function maybeAlertReset(string $windowEndsAt): void
 
     $pdo = db();
     $stmt = $pdo->query('SELECT last_alerted_window_end FROM alert_state WHERE id = 1');
-    if ($stmt->fetchColumn() === $windowEndsAt) return; // already alerted this window
+    $raw = $stmt->fetchColumn();
+    $prevEnd = 0;
+    if ($raw !== null && $raw !== false && $raw !== '') {
+        $s = (string)$raw;
+        $prevEnd = ctype_digit($s) ? (int)$s : (int)strtotime($s);
+    }
+    if ($prevEnd === $windowEnd) return;            // already alerted this window
+
+    // Race-safe claim: store unix ts (string) so future reads coerce cleanly.
+    $prevBind = ($raw === null || $raw === false) ? null : (string)$raw;
+    $claim = $pdo->prepare(
+        'UPDATE alert_state SET last_alerted_window_end = ?
+         WHERE id = 1 AND last_alerted_window_end <=> ?'
+    );
+    $claim->execute([(string)$windowEnd, $prevBind]);
+    if ($claim->rowCount() !== 1) return;
 
     $resetFmt = (new DateTime('@' . $windowEnd))->setTimezone(tz())->format('H:i');
     $text = "⚠️ *" . appName() . " quota reset soon*\n"
         . "Time left: {$remainingMin} min\n"
         . "Reset: {$resetFmt} " . tzAbbr() . "\n";
 
-    if (tgSend($text)) {
-        $upd = $pdo->prepare('UPDATE alert_state SET last_alerted_window_end = ? WHERE id = 1');
-        $upd->execute([$windowEndsAt]);
+    if (!tgSend($text)) {
+        $release = $pdo->prepare('UPDATE alert_state SET last_alerted_window_end = ? WHERE id = 1');
+        $release->execute([$prevBind]);
     }
 }
 
 /**
  * Alert via Telegram when token usage crosses a milestone (25/50/75/90%).
- * Sends once per milestone per window (dedup key = milestone + window start).
+ * Sends once per milestone per window. Dedup keys the milestone list by the
+ * window's unix ts (int), not the raw string, so timestamp format drift can't
+ * reset the list and re-fire every milestone on each poll. Race-safe claim.
  */
 function maybeAlertUsage(array $q): void
 {
@@ -326,25 +380,64 @@ function maybeAlertUsage(array $q): void
     }
     if ($hit === null) return;
 
+    $startTs = strtotime($windowStart);
+    if ($startTs === false) return;
+
     $pdo = db();
     $stmt = $pdo->prepare('SELECT usage_window, alerted_milestones FROM alert_state WHERE id = 1');
     $stmt->execute();
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    $done = ($row['usage_window'] === $windowStart)
-        ? explode(',', $row['alerted_milestones'] ?? '')
-        : [];
+
+    // Coerce stored usage_window (may be legacy ISO string) to unix ts for compare.
+    $prevWindowRaw = $row['usage_window'] ?? null;
+    $prevWindowTs = 0;
+    if ($prevWindowRaw !== null && $prevWindowRaw !== '') {
+        $s = (string)$prevWindowRaw;
+        $prevWindowTs = ctype_digit($s) ? (int)$s : (int)strtotime($s);
+    }
+
+    if ($prevWindowTs === $startTs) {
+        $done = explode(',', $row['alerted_milestones'] ?? '');
+    } else {
+        $done = [];                                  // new/first window — fresh list
+    }
     if (in_array((string)$hit, $done, true)) return; // already alerted this milestone
+
+    $done[] = (string)$hit;
+    $newList = implode(',', $done);
+    $prevList = ($row['alerted_milestones'] ?? null);
+
+    if ($prevWindowTs === $startTs) {
+        // Same window — append milestone, claim only if list unchanged.
+        $claim = $pdo->prepare(
+            'UPDATE alert_state SET alerted_milestones = ?
+             WHERE id = 1 AND usage_window = ? AND alerted_milestones <=> ?'
+        );
+        $claim->execute([$newList, (string)$startTs, $prevList]);
+    } else {
+        // New window — set both columns atomically if the window col is unchanged.
+        $prevWindowBind = ($prevWindowRaw === null || $prevWindowRaw === '') ? null : (string)$prevWindowRaw;
+        $claim = $pdo->prepare(
+            'UPDATE alert_state SET usage_window = ?, alerted_milestones = ?
+             WHERE id = 1 AND usage_window <=> ?'
+        );
+        $claim->execute([(string)$startTs, $newList, $prevWindowBind]);
+    }
+    if ($claim->rowCount() !== 1) return;            // lost the race
 
     $text = "📊 *Token usage {$hit}%*\n"
         . "Used: " . number_format($used) . " / " . number_format($limit) . "\n"
         . "Remaining: " . number_format($limit - $used);
 
-    if (tgSend($text)) {
-        $done[] = (string)$hit;
-        $upd = $pdo->prepare(
+    if (!tgSend($text)) {
+        // Revert on failure so next poll retries.
+        $release = $pdo->prepare(
             'UPDATE alert_state SET usage_window = ?, alerted_milestones = ? WHERE id = 1'
         );
-        $upd->execute([$windowStart, implode(',', $done)]);
+        $release->execute([
+            ($prevWindowRaw === null || $prevWindowRaw === '') ? null : (string)$prevWindowRaw,
+            $prevList,
+        ]);
     }
 }
 

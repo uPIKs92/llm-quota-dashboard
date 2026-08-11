@@ -9,7 +9,7 @@
 
 require __DIR__ . '/../server.php';
 
-$result = pollQuota();
+$result = pollQuota(true);
 $ts = date('c');
 if ($result['code'] === 200) {
     fwrite(STDOUT, "[{$ts}] poll ok\n");
