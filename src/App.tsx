@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   ArrowClockwise,
   CalendarBlank,
@@ -100,6 +100,22 @@ export default function App() {
   const [history, setHistory] = useState<HistoryDay[]>([])
   const [status, setStatus] = useState<Status>("loading")
   const [error, setError] = useState("")
+  const [hoverDate, setHoverDate] = useState<string | null>(null)
+  const [pinDate, setPinDate] = useState<string | null>(null)
+  const chartRef = useRef<HTMLDivElement>(null)
+
+  // Close pinned tooltip on outside tap/click (mouse + touch).
+  useEffect(() => {
+    if (!pinDate) return
+    function onPointerDown(e: PointerEvent) {
+      if (!chartRef.current?.contains(e.target as Node)) {
+        setPinDate(null)
+        setHoverDate(null)
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    return () => document.removeEventListener("pointerdown", onPointerDown)
+  }, [pinDate])
 
   const loadConfig = useCallback(async () => {
     try {
@@ -323,29 +339,60 @@ export default function App() {
                 <p className="eyebrow text-card-foreground/55">Daily usage</p>
                 <p className="text-xs text-card-foreground/60 sm:text-sm">30 days</p>
               </div>
-              <div className="mt-3 flex h-16 items-end gap-1 sm:mt-4 sm:h-24 sm:gap-1.5">
+              <div
+                ref={chartRef}
+                className="relative mt-3 flex h-16 items-end gap-1 sm:mt-4 sm:h-24 sm:gap-1.5"
+                onMouseLeave={() => setHoverDate(null)}
+              >
                 {history.length === 0 ? (
                   <span className="text-sm text-card-foreground/50">No data yet</span>
                 ) : (
-                  history.map(d => (
-                    <div key={d.log_date} className="flex h-full flex-1 flex-col items-center gap-1">
-                      <div className="flex w-full flex-1 items-end">
-                        <div
-                          className={cn(
-                            "w-full rounded-full",
-                            d.log_date === today ? "bg-card-foreground" : "bg-card-foreground/25",
-                          )}
-                          style={{
-                            height: `${Math.max((d.tokens_used / max) * 100, 4)}%`,
-                          }}
-                          title={`${fmtDate(d.log_date)} · ${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`}
-                        />
-                      </div>
-                      <span className="hidden text-[10px] text-card-foreground/50 sm:inline">
-                        {fmtWeekday(d.log_date)}
-                      </span>
-                    </div>
-                  ))
+                  history.map((d, i) => {
+                    const isOpen = hoverDate === d.log_date || pinDate === d.log_date
+                    return (
+                      <button
+                        key={d.log_date}
+                        type="button"
+                        className="group relative flex h-full flex-1 cursor-pointer flex-col items-center gap-1 outline-none"
+                        onMouseEnter={() => setHoverDate(d.log_date)}
+                        onMouseLeave={() => setHoverDate(null)}
+                        onFocus={() => setHoverDate(d.log_date)}
+                        onBlur={() => setHoverDate(null)}
+                        onClick={() => setPinDate(p => (p === d.log_date ? null : d.log_date))}
+                        aria-label={`${fmtDate(d.log_date)}, ${fmtShort(d.tokens_used)} tokens, ${fmtTokens(d.requests)} requests`}
+                      >
+                        <div className="relative flex w-full flex-1 items-end">
+                          <div
+                            className={cn(
+                              "w-full rounded-full transition-opacity",
+                              d.log_date === today ? "bg-card-foreground" : "bg-card-foreground/25",
+                              !isOpen && "group-hover:opacity-80",
+                            )}
+                            style={{
+                              height: `${Math.max((d.tokens_used / max) * 100, 4)}%`,
+                            }}
+                          />
+                          <span
+                            role="tooltip"
+                            className={cn(
+                              "pointer-events-none absolute bottom-full z-50 mb-1.5 whitespace-nowrap rounded-lg bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-lg ring-1 ring-card-foreground/10 backdrop-blur transition-opacity duration-100",
+                              isOpen ? "opacity-100" : "opacity-0",
+                              i === 0
+                                ? "left-0"
+                                : i === history.length - 1
+                                  ? "right-0"
+                                  : "left-1/2 -translate-x-1/2",
+                            )}
+                          >
+                            {fmtDate(d.log_date)} · {fmtShort(d.tokens_used)} tokens · {fmtTokens(d.requests)} req
+                          </span>
+                        </div>
+                        <span className="hidden text-[10px] text-card-foreground/50 sm:inline">
+                          {fmtWeekday(d.log_date)}
+                        </span>
+                      </button>
+                    )
+                  })
                 )}
               </div>
             </GlassCard>
