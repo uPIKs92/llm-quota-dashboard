@@ -48,6 +48,12 @@ ALTER TABLE `alert_state`
 ALTER TABLE `alert_state`
   ADD COLUMN IF NOT EXISTS `was_exhausted` tinyint(1) NOT NULL DEFAULT 0;
 
+-- Unix ts of the last replenish-ping attempt (success or failure). One 1-token
+-- completion is fired when exhausted + boundary passed, to roll the upstream
+-- window so the 🟢 alert doesn't wait for organic usage. Throttled to 5 min.
+ALTER TABLE `alert_state`
+  ADD COLUMN IF NOT EXISTS `last_ping_ts` bigint(20) NOT NULL DEFAULT 0;
+
 -- One row per minute of cumulative lifetime-token counts, used to derive the
 -- tokens-per-minute rate. Pruned to the last 24h by the poller. Idempotent.
 CREATE TABLE IF NOT EXISTS `token_minute_log` (

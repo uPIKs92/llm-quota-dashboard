@@ -193,21 +193,7 @@ function pollQuota(bool $fireAlerts = false): array
     if ($code === 200 && $body) {
         $data = json_decode($body, true);
         if (is_array($data)) {
-            $q = normalizeQuota($data);
-            logDaily($q['totalLifetime'], $q['totalRequests']);
-            // Alerts + TPM logging fire only from the cron poller (fireAlerts=true),
-            // never from the browser-driven /api/stats route — eliminates races
-            // between concurrent cron + dashboard polls that caused duplicate msgs.
-            if ($fireAlerts) {
-                logTpm($q['totalLifetime']); // computes + stores current_tpm
-                maybeAlertReset($q['windowEnd']);
-                maybeAlertResetNow($q['windowStart'], $q['windowEnd']);
-                maybeAlertReplenish($q);
-                maybeAlertUsage($q);
-            }
-            $q['tpm'] = readTpm();           // stored value; fresh if cron, last cron value if dashboard
-            cacheStats($q);                  // last good payload — served when upstream fails
-            $body = json_encode($q);
+            $body = processGoodPoll(normalizeQuota($data), $fireAlerts);
         }
     }
 
@@ -223,11 +209,50 @@ function pollQuota(bool $fireAlerts = false): array
             }
             $cached['tpm'] = readTpm();
             $cached['stale'] = true;
-            return ['code' => 200, 'body' => json_encode($cached)];
+            $code = 200;
+            $body = json_encode($cached);
+        }
+    }
+
+    // Replenish ping (cron only): exhausted + boundary passed. One 1-token
+    // completion rolls the upstream window even with zero organic usage — the
+    // /stats endpoint is read-only, only a real completion starts the next
+    // window. Immediate re-poll picks up fresh quota so the 🟢 replenish alert
+    // fires this tick instead of waiting for the next request.
+    if ($fireAlerts && $code === 200 && $body) {
+        $q = json_decode($body, true);
+        if (is_array($q) && maybeReplenishPing($q)) {
+            $fresh = fetchUpstream();
+            if ($fresh !== null) {
+                $body = processGoodPoll($fresh, true);
+            }
         }
     }
 
     return ['code' => $code, 'body' => $body ?: ''];
+}
+
+/**
+ * Shared success path: log daily stats, fire alerts (cron only), cache the
+ * payload, return the encoded body. Used by the first poll and by the
+ * post-replenish-ping re-poll.
+ */
+function processGoodPoll(array $q, bool $fireAlerts): string
+{
+    logDaily($q['totalLifetime'], $q['totalRequests']);
+    // Alerts + TPM logging fire only from the cron poller (fireAlerts=true),
+    // never from the browser-driven /api/stats route — eliminates races
+    // between concurrent cron + dashboard polls that caused duplicate msgs.
+    if ($fireAlerts) {
+        logTpm($q['totalLifetime']); // computes + stores current_tpm
+        maybeAlertReset($q['windowEnd']);
+        maybeAlertResetNow($q['windowStart'], $q['windowEnd']);
+        maybeAlertReplenish($q);
+        maybeAlertUsage($q);
+    }
+    $q['tpm'] = readTpm();           // stored value; fresh if cron, last cron value if dashboard
+    cacheStats($q);                  // last good payload — served when upstream fails
+    return json_encode($q);
 }
 
 /** Persist the last good normalized payload for stale-while-error serving. */
@@ -411,6 +436,15 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
         );
         $claim->execute([(string)$nextEnd, $prevBind]);
         if ($claim->rowCount() === 1) {
+            // When the ending window was exhausted and the replenish ping is
+            // enabled, skip ✅ — the ping rolls the window and the 🟢 replenish
+            // alert confirms fresh quota seconds later, so ✅ would be noise.
+            $exh = $pdo->query('SELECT was_exhausted FROM alert_state WHERE id = 1')->fetchColumn();
+            $wasExhausted = ($exh === 1 || (string)$exh === '1');
+            if ($wasExhausted && replenishPingUrl() !== '') {
+                return; // projection stays claimed; 🟢 covers this boundary
+            }
+
             $endFmt = (new DateTime('@' . $knownEnd))->setTimezone(tz())->format('H:i');
             $elapsedMin = (int)max((time() - $knownEnd) / 60, 0);
             $text = "✅ *" . appName() . " quota reset*\n"
@@ -483,6 +517,74 @@ function maybeAlertReplenish(array $q): void
         $release = $pdo->prepare('UPDATE alert_state SET was_exhausted = 1 WHERE id = 1');
         $release->execute();
     }
+}
+
+/**
+ * Completions endpoint for the replenish ping. Explicit REPLENISH_PING_URL wins
+ * ("off"/"0" disables); default derives <upstream-minus-/stats>/v1/chat/completions.
+ */
+function replenishPingUrl(): string
+{
+    $v = trim(env()['REPLENISH_PING_URL'] ?? '');
+    if (strcasecmp($v, '0') === 0 || strcasecmp($v, 'off') === 0) return '';
+    if ($v !== '') return $v;
+    $u = upstreamUrl();
+    if ($u === '') return '';
+    return preg_replace('#/stats$#', '', $u) . '/v1/chat/completions';
+}
+
+/**
+ * Replenish ping: when the window is exhausted and wall-clock has passed the
+ * known window end, fire ONE 1-token completion. /stats is read-only — the
+ * upstream window only rolls on a real request, so without this the 🟢 alert
+ * waits for organic usage that may never come. Cron poller only. Throttled to
+ * one attempt per 5 min so a dead upstream can't stack curl timeouts every
+ * minute. Returns true when the completion was accepted — the caller re-polls
+ * immediately so 🟢 fires on this tick.
+ */
+function maybeReplenishPing(array $q): bool
+{
+    $limit = (int)($q['limit'] ?? 0);
+    if ($limit <= 0) return false;
+    if ((int)($q['remaining'] ?? 1) > 0 && (int)($q['used'] ?? 0) < $limit) return false; // not exhausted
+
+    $url = replenishPingUrl();
+    $key = apiKey();
+    if ($url === '' || $key === '') return false;
+
+    $pdo = db();
+
+    // Boundary: only after the known window end has passed.
+    $raw = $pdo->query('SELECT known_window_end FROM alert_state WHERE id = 1')->fetchColumn();
+    $knownEnd = (is_string($raw) && ctype_digit($raw)) ? (int)$raw : 0;
+    if ($knownEnd === 0 || time() < $knownEnd) return false;
+
+    // Throttle: one attempt per 5 minutes (success OR failure).
+    $rawTs = $pdo->query('SELECT last_ping_ts FROM alert_state WHERE id = 1')->fetchColumn();
+    $lastTs = (is_string($rawTs) && ctype_digit($rawTs)) ? (int)$rawTs : 0;
+    if ($lastTs > 0 && (time() - $lastTs) < 300) return false;
+
+    // Record the attempt BEFORE sending so failures count against the throttle.
+    $pdo->prepare('UPDATE alert_state SET last_ping_ts = ? WHERE id = 1')->execute([(string)time()]);
+
+    $payload = json_encode([
+        'model' => ($q['model'] ?? '') !== '' ? $q['model'] : 'glm-5-turbo',
+        'messages' => [['role' => 'user', 'content' => 'hi']],
+        'max_tokens' => 1,
+        'stream' => false,
+    ]);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $key],
+        CURLOPT_POSTFIELDS => $payload,
+        CURLOPT_TIMEOUT => 15,
+    ]);
+    curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return $status >= 200 && $status < 300;
 }
 
 /**
