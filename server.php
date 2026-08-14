@@ -202,14 +202,49 @@ function pollQuota(bool $fireAlerts = false): array
                 logTpm($q['totalLifetime']); // computes + stores current_tpm
                 maybeAlertReset($q['windowEnd']);
                 maybeAlertResetNow($q['windowStart'], $q['windowEnd']);
+                maybeAlertReplenish($q);
                 maybeAlertUsage($q);
             }
             $q['tpm'] = readTpm();           // stored value; fresh if cron, last cron value if dashboard
+            cacheStats($q);                  // last good payload — served when upstream fails
             $body = json_encode($q);
         }
     }
 
+    // Upstream failed (e.g. key rejected/exhausted, proxy 5xx). Serve the last
+    // good payload flagged stale so the dashboard keeps rendering the countdown
+    // instead of an empty page. Only the wall-clock reset alert (✅) may fire
+    // from cached data — it depends on known_window_end, not upstream.
+    if ($code !== 200) {
+        $cached = readCachedStats();
+        if ($cached !== null) {
+            if ($fireAlerts) {
+                maybeAlertResetNow($cached['windowStart'] ?? '', $cached['windowEnd'] ?? '');
+            }
+            $cached['tpm'] = readTpm();
+            $cached['stale'] = true;
+            return ['code' => 200, 'body' => json_encode($cached)];
+        }
+    }
+
     return ['code' => $code, 'body' => $body ?: ''];
+}
+
+/** Persist the last good normalized payload for stale-while-error serving. */
+function cacheStats(array $q): void
+{
+    $pdo = db();
+    $stmt = $pdo->prepare('UPDATE alert_state SET last_good_stats = ? WHERE id = 1');
+    $stmt->execute([json_encode($q)]);
+}
+
+/** Read the cached payload. Returns null when never cached or corrupt. */
+function readCachedStats(): ?array
+{
+    $raw = db()->query('SELECT last_good_stats FROM alert_state WHERE id = 1')->fetchColumn();
+    if (!is_string($raw) || $raw === '') return null;
+    $q = json_decode($raw, true);
+    return is_array($q) ? $q : null;
 }
 
 function logDaily(int $lifetimeTokens, int $requests): void
@@ -400,6 +435,53 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
              WHERE id = 1 AND known_window_end <=> ?'
         );
         $claim->execute([(string)$end, $prevBind]);
+    }
+}
+
+/**
+ * Alert via Telegram when quota is replenished after exhaustion. Tracks whether
+ * the previous poll saw the window exhausted (used >= limit or remaining <= 0);
+ * when a fresh poll reports quota available again, send once. The flag flip
+ * itself is the race-safe claim (conditional UPDATE on was_exhausted = 1), so
+ * concurrent polls can't double-send. Exhaustion can only clear at a window
+ * roll, so no extra window dedup key is needed.
+ */
+function maybeAlertReplenish(array $q): void
+{
+    $e = env();
+    if (empty($e['TELEGRAM_BOT_TOKEN']) || empty($e['TELEGRAM_CHAT_ID'])) return;
+
+    $limit = $q['limit'];
+    if ($limit <= 0) return;
+    $exhausted = ($q['remaining'] <= 0 || $q['used'] >= $limit);
+
+    $pdo = db();
+
+    if ($exhausted) {
+        // Record exhaustion; cheap unconditional write, value is monotone here.
+        $stmt = $pdo->prepare('UPDATE alert_state SET was_exhausted = 1 WHERE id = 1 AND was_exhausted = 0');
+        $stmt->execute();
+        return;
+    }
+
+    // Not exhausted — fire only on the exhausted -> available transition.
+    $claim = $pdo->prepare(
+        'UPDATE alert_state SET was_exhausted = 0 WHERE id = 1 AND was_exhausted = 1'
+    );
+    $claim->execute();
+    if ($claim->rowCount() !== 1) return; // wasn't exhausted before (or lost the race)
+
+    $endFmt = ($q['windowEnd'] ?? '') !== ''
+        ? (new DateTime('@' . strtotime($q['windowEnd'])))->setTimezone(tz())->format('H:i')
+        : '—';
+    $text = "🟢 *" . appName() . " quota replenished*\n"
+        . "Available: " . number_format($q['remaining']) . " tokens\n"
+        . "Window ends: {$endFmt} " . tzAbbr();
+
+    if (!tgSend($text)) {
+        // Send failed — restore the flag so the next poll retries.
+        $release = $pdo->prepare('UPDATE alert_state SET was_exhausted = 1 WHERE id = 1');
+        $release->execute();
     }
 }
 

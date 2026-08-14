@@ -4,10 +4,12 @@ import {
   CalendarBlank,
   Clock,
   Coins,
+  Fire,
   Gauge,
   Hash,
   MoonStars,
   Sun,
+  Warning,
 } from "@phosphor-icons/react"
 import { GlassCard } from "@/components/ui/glass-card"
 import { Progress } from "@/components/ui/progress"
@@ -36,6 +38,7 @@ interface QuotaData {
   expiryDate: string
   lastUsed: string
   tpm: number
+  stale?: boolean
 }
 
 type Status = "ok" | "error" | "loading"
@@ -165,6 +168,8 @@ export default function App() {
   }, [checkQuota, loadHistory, loadConfig])
 
   const pct = data && data.limit > 0 ? (data.used / data.limit) * 100 : 0
+  // Quota exhausted: no tokens left in this window — replenish at window end.
+  const isExhausted = !!data && data.limit > 0 && data.remaining <= 0
   // Tier model mirrors ResetWindowBar: low (<70) / mid (70-89) / high (>=90).
   const tier = pct >= 90 ? "high" : pct >= 70 ? "mid" : "low"
   const quotaIndicatorClass =
@@ -253,6 +258,18 @@ export default function App() {
                 <span className="eyebrow glass-pill inline-block rounded-full px-2.5 py-1 text-card-foreground/75">
                   Quota
                 </span>
+                {isExhausted && (
+                  <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2.5 py-1 text-tier-high">
+                    <Fire size={12} weight="thin" />
+                    Quota habis
+                  </span>
+                )}
+                {data.stale && (
+                  <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-amber-600 dark:text-amber-400">
+                    <Warning size={12} weight="thin" />
+                    Upstream down — cached
+                  </span>
+                )}
                 <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-card-foreground/75">
                   <CalendarBlank size={12} weight="thin" />
                   {data.isExpired ? "Expired" : fmtDate(data.expiryDate)}
@@ -300,7 +317,7 @@ export default function App() {
           <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-8 md:gap-4">
             {/* Reset window — full width */}
             <div className="col-span-2 md:col-span-8">
-              <ResetWindowBar windowStart={data.windowStart} windowEnd={data.windowEnd} />
+              <ResetWindowBar windowStart={data.windowStart} windowEnd={data.windowEnd} exhausted={isExhausted} />
             </div>
 
             {/* Last used — wide, with Today sub-badge */}

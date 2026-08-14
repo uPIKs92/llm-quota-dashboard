@@ -37,6 +37,17 @@ ALTER TABLE `alert_state`
 ALTER TABLE `alert_state`
   ADD COLUMN IF NOT EXISTS `current_tpm` int(11) NOT NULL DEFAULT 0;
 
+-- Last good normalized upstream payload (JSON). Served flagged stale when the
+-- upstream fails (exhausted key, proxy down) so the dashboard keeps rendering
+-- the replenish countdown instead of an empty page. Idempotent.
+ALTER TABLE `alert_state`
+  ADD COLUMN IF NOT EXISTS `last_good_stats` text;
+
+-- 1 when the previous poll saw the quota window exhausted; the exhausted ->
+-- available transition triggers the replenish Telegram alert. Idempotent.
+ALTER TABLE `alert_state`
+  ADD COLUMN IF NOT EXISTS `was_exhausted` tinyint(1) NOT NULL DEFAULT 0;
+
 -- One row per minute of cumulative lifetime-token counts, used to derive the
 -- tokens-per-minute rate. Pruned to the last 24h by the poller. Idempotent.
 CREATE TABLE IF NOT EXISTS `token_minute_log` (

@@ -20,6 +20,8 @@ function countdown(ms: number): string {
 interface Props {
   windowStart: string
   windowEnd: string
+  /** Quota exhausted this window — label the countdown as replenish time. */
+  exhausted?: boolean
 }
 
 const shellStyle = { "--reveal-delay": "120ms" } as CSSProperties
@@ -58,7 +60,7 @@ function glowShadow(p: number): string {
   return `0 0 16px 2px rgba(255,110,60,${(0.45 * a).toFixed(3)}), inset 0 0 12px rgba(232,52,28,${(0.22 * a).toFixed(3)})`
 }
 
-export function ResetWindowBar({ windowStart, windowEnd }: Props) {
+export function ResetWindowBar({ windowStart, windowEnd, exhausted }: Props) {
   // independent 1s tick so countdown stays live
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -130,12 +132,14 @@ export function ResetWindowBar({ windowStart, windowEnd }: Props) {
         {/* foreground text */}
         <div className="relative z-10 flex w-full items-center justify-between">
           <div>
-            <p className="eyebrow glass-pill inline-block rounded-full px-2 py-0.5 text-white/70">Reset window</p>
+            <p className="eyebrow glass-pill inline-block rounded-full px-2 py-0.5 text-white/70">
+              {exhausted ? "Replenish in" : "Reset window"}
+            </p>
             <p
               className="mt-1 text-lg sm:text-3xl font-bold tabular-nums tracking-tight text-white"
               style={{ textShadow: "0 1px 4px rgba(0,0,0,0.35)" }}
             >
-              {isOver ? "Resetting…" : countdown(remaining)}
+              {isOver ? "Replenishing…" : countdown(remaining)}
             </p>
           </div>
           <div className="hidden text-right sm:block">
