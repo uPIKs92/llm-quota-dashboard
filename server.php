@@ -308,16 +308,21 @@ function readTpm(): int
 /* --------------------------------- alerts --------------------------------- */
 
 /**
- * Alert once after a quota window ends. Fires on a time schedule derived from the
- * last known window end — so ✅ still fires even when the API is idle and the
- * upstream never reports a new windowStart. Immune to upstream timestamp drift
- * and to concurrent polls (cron vs dashboard).
+ * Alert once after a quota window ends. Fires when wall-clock time passes the
+ * last known window-end — derived from the window duration, so ✅ fires whether
+ * or not the API is used. Immune to upstream timestamp drift and to concurrent
+ * polls (cron vs dashboard).
+ *
+ * The boundary-cross check runs BEFORE reconciling from upstream, so ✅ still
+ * fires when a usage hit rolled the upstream window (upstream then reports a
+ * newer end). Reconcile previously ran first, advancing known_window_end past the
+ * boundary so the cross-check saw a future date and returned early — silently
+ * dropping ✅ whenever usage rolled the window at/around reset time.
  *
  * alert_state.known_window_end stores the last authoritative window-end (unix
- * seconds, as a string). It is reconciled from upstream whenever upstream reports
- * an end that is newer than what we have. On each fire, it is projected forward
- * by one window duration (skipping any catch-up windows) so only one ✅ sends per
- * genuine reset, with zero dependence on the API being used.
+ * seconds, as a string). On each fire it is projected forward by one window
+ * duration (skipping catch-up windows, snapping to upstream when upstream is
+ * ahead) so only one ✅ sends per genuine reset.
  */
 function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
 {
@@ -331,23 +336,15 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
 
     $pdo = db();
 
-    // --- reconcile: upstream is authoritative whenever it reports a newer end ---
+    // --- read the last known authoritative window-end ---
     $stmt = $pdo->query('SELECT known_window_end FROM alert_state WHERE id = 1');
     $raw = $stmt->fetchColumn();
     $knownEnd = 0;
+    $prevBind = null;
     if ($raw !== null && $raw !== false && $raw !== '') {
         $s = (string)$raw;
         $knownEnd = ctype_digit($s) ? (int)$s : (int)strtotime($s);
-    }
-
-    if ($end && $end > $knownEnd) {
-        $prevBind = ($raw === null || $raw === false) ? null : (string)$raw;
-        $claim = $pdo->prepare(
-            'UPDATE alert_state SET known_window_end = ?
-             WHERE id = 1 AND known_window_end <=> ?'
-        );
-        $claim->execute([(string)$end, $prevBind]);
-        $knownEnd = $end;
+        $prevBind = $s;
     }
 
     if ($knownEnd === 0) return; // nothing known yet — wait for the first real poll
@@ -356,34 +353,53 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
     $duration = ($start && $end && $end > $start) ? ($end - $start) : 5 * 3600;
     $duration = max($duration, 3600); // sanity floor 1h
 
-    // --- fire when the current wall-clock time has passed the known window end ---
-    if (time() < $knownEnd) return;
+    // --- fire ✅ when wall-clock has passed the known window end ---
+    // Checked BEFORE reconciling from upstream, so ✅ still fires even if a usage
+    // hit rolled the upstream window (upstream now reports a newer end). Previously
+    // reconcile advanced knownEnd first; the boundary-cross check then saw a future
+    // date and returned early — silently dropping ✅ whenever usage rolled the window.
+    if (time() >= $knownEnd) {
+        // Race-safe claim: project known_window_end forward. Skip past any catch-up
+        // windows (e.g. after downtime) so only one ✅ sends, then advance to the
+        // next future boundary. If upstream already reports a newer end, snap to it
+        // (don't project past the real window). Conditional UPDATE => one poll wins.
+        $nextEnd = $knownEnd + $duration;
+        if ($end && $end > $knownEnd) {
+            $nextEnd = max($nextEnd, $end);
+        }
+        while ($nextEnd <= time()) {
+            $nextEnd += $duration;
+        }
+        $claim = $pdo->prepare(
+            'UPDATE alert_state SET known_window_end = ?
+             WHERE id = 1 AND known_window_end <=> ?'
+        );
+        $claim->execute([(string)$nextEnd, $prevBind]);
+        if ($claim->rowCount() === 1) {
+            $endFmt = (new DateTime('@' . $knownEnd))->setTimezone(tz())->format('H:i');
+            $elapsedMin = (int)max((time() - $knownEnd) / 60, 0);
+            $text = "✅ *" . appName() . " quota reset*\n"
+                . "Last window ended: {$endFmt} " . tzAbbr() . "\n"
+                . "Elapsed: {$elapsedMin} min ago";
 
-    // Race-safe claim: project known_window_end forward. Skip past any catch-up
-    // windows (e.g. after downtime) so only one ✅ sends, then advance to the
-    // next future boundary. Conditional UPDATE => only one poll wins the race.
-    $nextEnd = $knownEnd + $duration;
-    while ($nextEnd <= time()) {
-        $nextEnd += $duration;
+            if (!tgSend($text)) {
+                // Send failed — revert the projection so the next poll retries.
+                $release = $pdo->prepare('UPDATE alert_state SET known_window_end = ? WHERE id = 1');
+                $release->execute([$prevBind]);
+            }
+        }
+        return; // boundary handled (or lost the race) — done for this poll
     }
-    $prevBind = (string)$knownEnd;
-    $claim = $pdo->prepare(
-        'UPDATE alert_state SET known_window_end = ?
-         WHERE id = 1 AND known_window_end <=> ?'
-    );
-    $claim->execute([(string)$nextEnd, $prevBind]);
-    if ($claim->rowCount() !== 1) return;           // lost the race — another poll won
 
-    $endFmt = (new DateTime('@' . $knownEnd))->setTimezone(tz())->format('H:i');
-    $elapsedMin = (int)max((time() - $knownEnd) / 60, 0);
-    $text = "✅ *" . appName() . " quota reset*\n"
-        . "Last window ended: {$endFmt} " . tzAbbr() . "\n"
-        . "Elapsed: {$elapsedMin} min ago";
-
-    if (!tgSend($text)) {
-        // Send failed — revert the projection so the next poll retries.
-        $release = $pdo->prepare('UPDATE alert_state SET known_window_end = ? WHERE id = 1');
-        $release->execute([$prevBind]);
+    // --- reconcile: upstream is authoritative when it reports a newer end but the
+    // known boundary hasn't been crossed yet (e.g. the upstream window shifted
+    // forward without wall-clock passing the old end). Silent advance, no alert. ---
+    if ($end && $end > $knownEnd) {
+        $claim = $pdo->prepare(
+            'UPDATE alert_state SET known_window_end = ?
+             WHERE id = 1 AND known_window_end <=> ?'
+        );
+        $claim->execute([(string)$end, $prevBind]);
     }
 }
 
