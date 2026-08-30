@@ -301,7 +301,7 @@ export default function App() {
                   .{pctDec}%
                 </span>
               </p>
-              <p className="mt-1.5 text-sm text-card-foreground/60">
+              <p className="mt-1.5 text-sm text-card-foreground/70">
                 {fmtTokens(data.used)} / {fmtTokens(data.limit)} tokens
               </p>
 
@@ -311,13 +311,13 @@ export default function App() {
                 </Progress>
               </div>
               <div className="mt-2 flex items-center justify-between text-sm">
-                <span className="text-card-foreground/65">
+                <span className="text-card-foreground/70">
                   Used{" "}
                   <span className={cn("font-semibold tabular-nums", pctColor)}>
                     {pctFixed}%
                   </span>
                 </span>
-                <span className="font-medium tabular-nums text-card-foreground/65">
+                <span className="font-medium tabular-nums text-card-foreground/70">
                   {fmtTokens(data.remaining)} remaining
                 </span>
               </div>
@@ -370,8 +370,8 @@ export default function App() {
             {/* 30-day chart */}
             <GlassCard className="col-span-2 md:col-span-8" revealDelay={240} innerClassName="p-3 sm:p-6">
               <div className="flex items-baseline justify-between">
-                <p className="eyebrow text-card-foreground/55">Daily usage</p>
-                <p className="text-xs text-card-foreground/60 sm:text-sm">30 days</p>
+                <p className="eyebrow text-card-foreground/65">Daily usage</p>
+                <p className="text-xs text-card-foreground/70 sm:text-sm">30 days</p>
               </div>
               <div
                 ref={chartRef}

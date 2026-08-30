@@ -356,12 +356,38 @@
     inset 0 0 0 1px rgba(255,255,255,0.4);
 }
 
+/* Loading skeleton — tinted block with a soft shimmer sweep */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: color-mix(in srgb, currentColor 10%, transparent);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, currentColor 10%, transparent),
+    transparent
+  );
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .reset-burn-mid,
   .reset-burn-high,
   .reset-glow-high,
   .reset-ember,
-  .quota-tier-high-glow {
+  .quota-tier-high-glow,
+  .animate-pulse,
+  .animate-spin,
+  .skeleton::after {
     animation: none !important;
   }
   .reset-burn-mid { opacity: 0.5; }

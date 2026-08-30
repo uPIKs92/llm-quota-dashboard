@@ -30,7 +30,7 @@ export function StatTile({
     <GlassCard size={size} className={className} revealDelay={revealDelay} title={hint}>
       <div className="flex items-center justify-between gap-2 px-3 py-2.5 sm:px-4 sm:py-3">
         <div className="min-w-0">
-          <p className="eyebrow text-card-foreground/55">{label}</p>
+          <p className="eyebrow text-card-foreground/65">{label}</p>
           <p
             className={cn(
               "mt-1.5 break-words text-sm font-semibold tracking-tight text-card-foreground tabular-nums sm:text-lg",
