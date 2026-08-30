@@ -206,10 +206,10 @@ export default function App() {
 
   const statusDotColor: string =
     status === "ok"
-      ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+      ? "bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]"
       : status === "error"
-        ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]"
-        : "bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] animate-pulse"
+        ? "bg-red-400 shadow-[0_0_4px_rgba(248,113,113,0.5)]"
+        : "bg-amber-400 shadow-[0_0_4px_rgba(251,191,36,0.5)] animate-pulse"
 
   return (
     <>
@@ -322,9 +322,22 @@ export default function App() {
                 </span>
               </div>
             </>
+          ) : error ? (
+            <div className="flex min-h-[120px] flex-col items-center justify-center gap-3">
+              <p className="text-sm text-card-foreground/70">{error}</p>
+              <button
+                onClick={checkQuota}
+                className="spring rounded-full px-4 py-1.5 text-sm font-medium text-foreground/70 hover:bg-foreground/10 hover:text-foreground active:scale-[0.96]"
+              >
+                Retry
+              </button>
+            </div>
           ) : (
-            <div className="flex min-h-[120px] items-center justify-center">
-              <p className="text-sm text-card-foreground/50">{error || "Fetching data…"}</p>
+            <div className="flex min-h-[120px] flex-col justify-center gap-3">
+              <span className="skeleton h-5 w-16 rounded-full" />
+              <span className="skeleton h-9 w-24 rounded-md" />
+              <span className="skeleton h-5 w-full rounded" />
+              <span className="sr-only">Loading</span>
             </div>
           )}
         </GlassCard>

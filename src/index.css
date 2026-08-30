@@ -51,7 +51,7 @@
   --secondary-foreground: #5c5345;
 
   --muted: #f1eadc;
-  --muted-foreground: #8a7d6a;
+  --muted-foreground: #6f6350;
 
   --accent: #e9dfcb;
   --accent-foreground: #5c5345;
@@ -98,7 +98,7 @@
 
   --border: oklch(1 0 0 / 8%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.7 0.05 270);
+  --ring: oklch(0.7 0.04 75);
 
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
@@ -246,9 +246,10 @@
   :root { --bezel-pad: 0.25rem; --radius-squircle: 1.25rem; }
 }
 
-/* Mesh orb ambient background — fixed, behind everything */
-:root { --mesh-base: #faf6ef; --orb-1: #c4b5fd; --orb-2: #a7f3d0; }
-.dark { --mesh-base: #050505; --orb-1: #6d28d9; --orb-2: #047857; }
+/* Mesh orb ambient background — fixed, behind everything.
+   Warm ember + sage only — no violet in either theme. */
+:root { --mesh-base: #faf6ef; --orb-1: #e0c48d; --orb-2: #a7f3d0; }
+.dark { --mesh-base: #050505; --orb-1: #92400e; --orb-2: #047857; }
 .mesh-orbs {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
   overflow: hidden; background: var(--mesh-base, #050505);
@@ -260,7 +261,7 @@
 }
 .mesh-orbs::before {
   width: 40vw; height: 40vw; left: -10vw; top: -10vh;
-  background: radial-gradient(circle, var(--orb-1, #5b21b6) 0%, transparent 70%);
+  background: radial-gradient(circle, var(--orb-1, #e0c48d) 0%, transparent 70%);
 }
 .mesh-orbs::after {
   width: 45vw; height: 45vw; right: -12vw; bottom: -12vh;
