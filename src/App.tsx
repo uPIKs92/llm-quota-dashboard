@@ -158,6 +158,9 @@ export default function App() {
   }, [checkQuota, loadHistory, loadConfig])
 
   const pct = data && data.limit > 0 ? (data.used / data.limit) * 100 : 0
+  const pctFixed = pct.toFixed(2)
+  const pctInt = pctFixed.slice(0, -3)
+  const pctDec = pctFixed.slice(-2)
   // Quota exhausted: no tokens left in this window — replenish at window end.
   const isExhausted = !!data && data.limit > 0 && data.remaining <= 0
   // Tier model mirrors ResetWindowBar: low (<70) / mid (70-89) / high (>=90).
@@ -293,8 +296,10 @@ export default function App() {
                   pctColor,
                 )}
               >
-                {pct.toFixed(0)}
-                <span className="text-2xl text-card-foreground/50 sm:text-3xl">%</span>
+                {pctInt}
+                <span className="text-2xl text-card-foreground/50 sm:text-3xl">
+                  .{pctDec}%
+                </span>
               </p>
               <p className="mt-1.5 text-sm text-card-foreground/60">
                 {fmtTokens(data.used)} / {fmtTokens(data.limit)} tokens
@@ -302,14 +307,14 @@ export default function App() {
 
               <div className="quota-bar relative mt-4">
                 <Progress value={Math.min(pct, 100)} indicatorClassName={quotaIndicatorClass}>
-                  <span className="sr-only">Tokens used: {pct.toFixed(0)}%</span>
+                  <span className="sr-only">Tokens used: {pctFixed}%</span>
                 </Progress>
               </div>
               <div className="mt-2 flex items-center justify-between text-sm">
                 <span className="text-card-foreground/65">
                   Used{" "}
                   <span className={cn("font-semibold tabular-nums", pctColor)}>
-                    {pct.toFixed(0)}%
+                    {pctFixed}%
                   </span>
                 </span>
                 <span className="font-medium tabular-nums text-card-foreground/65">
