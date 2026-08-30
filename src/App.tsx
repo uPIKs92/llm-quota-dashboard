@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowClockwise,
   CalendarBlank,
@@ -73,16 +73,6 @@ function fmtDate(iso: string) {
   return new Intl.DateTimeFormat("id-ID", {
     timeZone: TZ_JAKARTA,
     dateStyle: "medium",
-  }).format(d)
-}
-
-/** Short weekday, indonesian. e.g. "Sen" */
-function fmtWeekday(iso: string) {
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return ""
-  return new Intl.DateTimeFormat("id-ID", {
-    timeZone: TZ_JAKARTA,
-    weekday: "short",
   }).format(d)
 }
 
@@ -188,6 +178,28 @@ export default function App() {
   const today = todayJakarta()
   const todayTokens = history.find(d => d.log_date === today)?.tokens_used ?? 0
   const max = Math.max(1, ...history.map(d => d.tokens_used))
+
+  // Chart geometry in percent units. `y` is the SVG y (0 = top); `h` is the
+  // height above baseline used by the HTML dot layer. x sits at hit-target
+  // centers ((i + 0.5) / n) so dots align exactly with the button columns.
+  const points = useMemo(
+    () =>
+      history.map((d, i) => {
+        const h = Math.max((d.tokens_used / max) * 100, 1.5)
+        return {
+          log_date: d.log_date,
+          x: ((i + 0.5) / history.length) * 100,
+          y: 100 - h,
+          h,
+        }
+      }),
+    [history, max],
+  )
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x} ${p.y}`).join(" ")
+  const areaPath =
+    points.length > 1
+      ? `${linePath} L${points[points.length - 1].x} 100 L${points[0].x} 100 Z`
+      : ""
 
   const statusDotColor: string =
     status === "ok"
@@ -358,58 +370,112 @@ export default function App() {
               </div>
               <div
                 ref={chartRef}
-                className="relative mt-3 flex h-16 items-end gap-1 sm:mt-4 sm:h-24 sm:gap-1.5"
+                className="relative mt-3 h-20 sm:mt-4 sm:h-28"
                 onMouseLeave={() => setHoverDate(null)}
               >
                 {history.length === 0 ? (
-                  <span className="text-sm text-card-foreground/50">No data yet</span>
+                  <div className="flex h-full items-end">
+                    <span className="text-sm text-card-foreground/60">No data yet</span>
+                  </div>
                 ) : (
-                  history.map((d, i) => {
-                    const isOpen = hoverDate === d.log_date || pinDate === d.log_date
-                    return (
-                      <button
-                        key={d.log_date}
-                        type="button"
-                        className="group relative flex h-full flex-1 cursor-pointer flex-col items-center gap-1 outline-none"
-                        onMouseEnter={() => setHoverDate(d.log_date)}
-                        onMouseLeave={() => setHoverDate(null)}
-                        onFocus={() => setHoverDate(d.log_date)}
-                        onBlur={() => setHoverDate(null)}
-                        onClick={() => setPinDate(p => (p === d.log_date ? null : d.log_date))}
-                        aria-label={`${fmtDate(d.log_date)}, ${fmtShort(d.tokens_used)} tokens, ${fmtTokens(d.requests)} requests`}
-                      >
-                        <div className="relative flex w-full flex-1 items-end">
-                          <div
-                            className={cn(
-                              "w-full rounded-full transition-opacity",
-                              d.log_date === today ? "bg-card-foreground" : "bg-card-foreground/25",
-                              !isOpen && "group-hover:opacity-80",
-                            )}
-                            style={{
-                              height: `${Math.max((d.tokens_used / max) * 100, 4)}%`,
-                            }}
+                  <>
+                    {/* Line + area (SVG, non-scaling stroke) */}
+                    {points.length > 1 && (
+                      <div className="pointer-events-none absolute inset-0 text-card-foreground/40">
+                        <svg
+                          aria-hidden
+                          className="h-full w-full"
+                          viewBox="0 0 100 100"
+                          preserveAspectRatio="none"
+                        >
+                          <defs>
+                            <linearGradient id="chart-area-fade" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="currentColor" stopOpacity="0.15" />
+                              <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+                            </linearGradient>
+                          </defs>
+                          <path d={areaPath} fill="url(#chart-area-fade)" />
+                          <path
+                            d={linePath}
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={1.5}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            vectorEffect="non-scaling-stroke"
                           />
-                          <span
-                            role="tooltip"
-                            className={cn(
-                              "pointer-events-none absolute bottom-full z-50 mb-1.5 whitespace-nowrap rounded-lg bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-lg ring-1 ring-card-foreground/10 backdrop-blur transition-opacity duration-100",
-                              isOpen ? "opacity-100" : "opacity-0",
-                              i === 0
-                                ? "left-0"
-                                : i === history.length - 1
-                                  ? "right-0"
-                                  : "left-1/2 -translate-x-1/2",
+                        </svg>
+                      </div>
+                    )}
+                    {/* Dots + hairline (HTML layer, no pointer events) */}
+                    <div className="pointer-events-none absolute inset-0">
+                      {points.map(p => {
+                        const isOpen = hoverDate === p.log_date || pinDate === p.log_date
+                        return (
+                          <span key={p.log_date}>
+                            {isOpen && (
+                              <span
+                                className="absolute bottom-0 w-px bg-card-foreground/20"
+                                style={{ left: `${p.x}%`, height: `${p.h}%` }}
+                              />
                             )}
-                          >
-                            {fmtDate(d.log_date)} · {fmtShort(d.tokens_used)} tokens · {fmtTokens(d.requests)} req
+                            <span
+                              className={cn(
+                                "spring absolute block rounded-full",
+                                isOpen
+                                  ? "size-2 bg-card-foreground ring-2 ring-card-foreground/20"
+                                  : p.log_date === today
+                                    ? "size-1 bg-card-foreground"
+                                    : "size-1 bg-card-foreground/35",
+                              )}
+                              style={{
+                                left: `${p.x}%`,
+                                bottom: `${p.h}%`,
+                                transform: "translate(-50%, 50%)",
+                              }}
+                            />
                           </span>
-                        </div>
-                        <span className="hidden text-[10px] text-card-foreground/50 sm:inline">
-                          {fmtWeekday(d.log_date)}
-                        </span>
-                      </button>
-                    )
-                  })
+                        )
+                      })}
+                    </div>
+                    {/* Hit targets */}
+                    <div className="flex h-full">
+                      {history.map((d, i) => {
+                        const isOpen = hoverDate === d.log_date || pinDate === d.log_date
+                        return (
+                          <button
+                            key={d.log_date}
+                            type="button"
+                            className="relative h-full flex-1 cursor-pointer outline-none"
+                            onMouseEnter={() => setHoverDate(d.log_date)}
+                            onMouseLeave={() => setHoverDate(null)}
+                            onFocus={() => setHoverDate(d.log_date)}
+                            onBlur={() => setHoverDate(null)}
+                            onClick={() => setPinDate(p => (p === d.log_date ? null : d.log_date))}
+                            aria-label={`${fmtDate(d.log_date)}, ${fmtShort(d.tokens_used)} tokens, ${fmtTokens(d.requests)} requests`}
+                          >
+                            <span
+                              role="tooltip"
+                              className={cn(
+                                "pointer-events-none absolute bottom-full z-50 mb-1.5 whitespace-nowrap rounded-lg bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-lg ring-1 ring-card-foreground/10 backdrop-blur transition-opacity duration-100",
+                                isOpen ? "opacity-100" : "opacity-0",
+                                i === 0
+                                  ? "left-0"
+                                  : i === history.length - 1
+                                    ? "right-0"
+                                    : "left-1/2 -translate-x-1/2",
+                              )}
+                            >
+                              <span className="block">{fmtDate(d.log_date)}</span>
+                              <span className="block">
+                                {fmtShort(d.tokens_used)} tokens · {fmtTokens(d.requests)} req
+                              </span>
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
                 )}
               </div>
             </GlassCard>
