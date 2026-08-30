@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   ArrowClockwise,
   CalendarBlank,
@@ -74,6 +74,17 @@ function fmtDate(iso: string) {
     timeZone: TZ_JAKARTA,
     dateStyle: "medium",
   }).format(d)
+}
+
+function parseUTCish(iso: string): number {
+  if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
+    return new Date(iso + "Z").getTime()
+  }
+  return new Date(iso).getTime()
+}
+
+function daysLeft(expiryIso: string): number {
+  return Math.ceil((parseUTCish(expiryIso) - Date.now()) / 86_400_000)
 }
 
 /** Today's date anchor in Jakarta time (YYYY-MM-DD), not UTC. */
@@ -211,6 +222,37 @@ export default function App() {
         ? "bg-red-400 shadow-[0_0_4px_rgba(248,113,113,0.5)]"
         : "bg-amber-400 shadow-[0_0_4px_rgba(251,191,36,0.5)] animate-pulse"
 
+  let subValue: ReactNode = "-"
+  let subValueClass = ""
+  let subBadge: ReactNode = null
+  if (data) {
+    if (data.isExpired) {
+      subValue = "Expired"
+      subValueClass = "text-tier-high"
+    } else if (data.expiryDate) {
+      const d = daysLeft(data.expiryDate)
+      subValue = fmtDate(data.expiryDate)
+      if (d <= 3) subValueClass = "text-tier-high"
+      const badgeText = d <= 0 ? "Ends today" : d === 1 ? "1 day left" : `${d} days left`
+      const badgeClass =
+        d <= 3
+          ? "text-tier-high"
+          : d <= 7
+            ? "text-amber-600 dark:text-amber-400"
+            : "text-card-foreground/75"
+      subBadge = (
+        <span
+          className={cn(
+            "eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5",
+            badgeClass,
+          )}
+        >
+          {badgeText}
+        </span>
+      )
+    }
+  }
+
   return (
     <>
       <div className="mesh-orbs" aria-hidden />
@@ -285,10 +327,6 @@ export default function App() {
                     Upstream down, using cache
                   </span>
                 )}
-                <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-card-foreground/75">
-                  <CalendarBlank size={12} weight="thin" />
-                  {data.isExpired ? "Expired" : fmtDate(data.expiryDate)}
-                </span>
               </div>
               <p
                 className={cn(
@@ -345,6 +383,17 @@ export default function App() {
         {/* Bento grid */}
         {data && (
           <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-8 md:gap-4">
+            {/* Subscription — expiry with urgency states */}
+            <StatTile
+              className="col-span-2 md:col-span-3"
+              revealDelay={120}
+              label="Subscription"
+              icon={<CalendarBlank size={16} weight="thin" />}
+              value={subValue}
+              valueClassName={subValueClass || undefined}
+              badge={subBadge}
+            />
+
             {/* Reset window — full width */}
             <div className="col-span-2 md:col-span-8">
               <ResetWindowBar windowStart={data.windowStart} windowEnd={data.windowEnd} exhausted={isExhausted} />
