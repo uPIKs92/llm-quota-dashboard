@@ -228,7 +228,7 @@ npm run dev             # frontend at :5173
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/stats` | GET | Normalized quota (proxied + mapped from upstream) |
-| `/api/history` | GET | Daily token log (last 14 days) |
+| `/api/history` | GET | Daily token log (last 30 days) |
 | `/api/config` | GET | `{ "appName": "..." }` |
 | `/api/tg/webhook` | POST | Telegram webhook receiver |
 
