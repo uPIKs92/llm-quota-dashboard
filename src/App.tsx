@@ -58,7 +58,7 @@ const TZ_JAKARTA = "Asia/Jakarta"
 /** Date + time, Indonesian, GMT+7. e.g. "11 Agt 2026, 14.30" */
 function fmtDateTime(iso: string) {
   const d = new Date(iso)
-  if (isNaN(d.getTime())) return iso || "—"
+  if (isNaN(d.getTime())) return iso || "-"
   return new Intl.DateTimeFormat("id-ID", {
     timeZone: TZ_JAKARTA,
     dateStyle: "medium",
@@ -69,7 +69,7 @@ function fmtDateTime(iso: string) {
 /** Date only, indonesian, GMT+7. e.g. "11 Agt 2026" */
 function fmtDate(iso: string) {
   const d = new Date(iso)
-  if (isNaN(d.getTime())) return iso || "—"
+  if (isNaN(d.getTime())) return iso || "-"
   return new Intl.DateTimeFormat("id-ID", {
     timeZone: TZ_JAKARTA,
     dateStyle: "medium",
@@ -276,13 +276,13 @@ export default function App() {
                 {isExhausted && (
                   <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2.5 py-1 text-tier-high">
                     <Fire size={12} weight="thin" />
-                    Quota habis
+                    Exhausted
                   </span>
                 )}
                 {data.stale && (
                   <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-amber-600 dark:text-amber-400">
                     <Warning size={12} weight="thin" />
-                    Upstream down — cached
+                    Upstream down, using cache
                   </span>
                 )}
                 <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-card-foreground/75">
@@ -343,7 +343,7 @@ export default function App() {
               revealDelay={160}
               label="Last used"
               icon={<Clock size={16} weight="thin" />}
-              value={data.lastUsed ? fmtDateTime(data.lastUsed) : "—"}
+              value={data.lastUsed ? fmtDateTime(data.lastUsed) : "-"}
               badge={
                 <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-card-foreground/75">
                   <Coins size={11} weight="thin" />
