@@ -339,9 +339,6 @@ export default function App() {
                   .{pctDec}%
                 </span>
               </p>
-              <p className="mt-1.5 text-sm text-card-foreground/70">
-                {fmtTokens(data.used)} / {fmtTokens(data.limit)} tokens
-              </p>
 
               <div className="quota-bar relative mt-4">
                 <Progress value={Math.min(pct, 100)} indicatorClassName={quotaIndicatorClass}>
@@ -351,9 +348,8 @@ export default function App() {
               <div className="mt-2 flex items-center justify-between text-sm">
                 <span className="text-card-foreground/70">
                   Used{" "}
-                  <span className={cn("font-semibold tabular-nums", pctColor)}>
-                    {pctFixed}%
-                  </span>
+                  <span className="font-semibold tabular-nums">{fmtTokens(data.used)}</span> /{" "}
+                  {fmtTokens(data.limit)}
                 </span>
                 <span className="font-medium tabular-nums text-card-foreground/70">
                   {fmtTokens(data.remaining)} remaining
