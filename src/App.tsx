@@ -232,24 +232,28 @@ export default function App() {
     } else if (data.expiryDate) {
       const d = daysLeft(data.expiryDate)
       subValue = fmtDate(data.expiryDate)
-      if (d <= 3) subValueClass = "text-tier-high"
-      const badgeText = d <= 0 ? "Ends today" : d === 1 ? "1 day left" : `${d} days left`
-      const badgeClass =
-        d <= 3
-          ? "text-tier-high"
-          : d <= 7
-            ? "text-amber-600 dark:text-amber-400"
-            : "text-card-foreground/75"
-      subBadge = (
-        <span
-          className={cn(
-            "eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5",
-            badgeClass,
-          )}
-        >
-          {badgeText}
-        </span>
-      )
+      if (Number.isNaN(d)) {
+        subBadge = null
+      } else {
+        if (d <= 3) subValueClass = "text-tier-high"
+        const badgeText = d <= 0 ? "Ends today" : d === 1 ? "1 day left" : `${d} days left`
+        const badgeClass =
+          d <= 3
+            ? "text-tier-high"
+            : d <= 7
+              ? "text-amber-600 dark:text-amber-400"
+              : "text-card-foreground/75"
+        subBadge = (
+          <span
+            className={cn(
+              "eyebrow glass-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5",
+              badgeClass,
+            )}
+          >
+            {badgeText}
+          </span>
+        )
+      }
     }
   }
 
@@ -390,7 +394,7 @@ export default function App() {
               badge={subBadge}
             />
 
-            {/* Reset window — full width */}
+            {/* Reset window — beside subscription */}
             <div className="col-span-2 md:col-span-5">
               <ResetWindowBar windowStart={data.windowStart} windowEnd={data.windowEnd} exhausted={isExhausted} />
             </div>
