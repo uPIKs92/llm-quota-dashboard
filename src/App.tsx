@@ -395,13 +395,13 @@ export default function App() {
             />
 
             {/* Reset window — full width */}
-            <div className="col-span-2 md:col-span-8">
+            <div className="col-span-2 md:col-span-5">
               <ResetWindowBar windowStart={data.windowStart} windowEnd={data.windowEnd} exhausted={isExhausted} />
             </div>
 
             {/* Last used — wide, with Today sub-badge */}
             <StatTile
-              className="col-span-2 md:col-span-8"
+              className="col-span-2 md:col-span-4"
               revealDelay={160}
               label="Last used"
               icon={<Clock size={16} weight="thin" />}
@@ -416,7 +416,7 @@ export default function App() {
 
             {/* Tokens/min — wide, with Requests sub-badge */}
             <StatTile
-              className="col-span-2 md:col-span-8"
+              className="col-span-2 md:col-span-4"
               revealDelay={200}
               label="Tokens/min"
               icon={<Gauge size={16} weight="thin" />}
