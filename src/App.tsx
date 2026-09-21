@@ -24,6 +24,12 @@ interface HistoryDay {
   requests: number
 }
 
+interface WindowPoint {
+  windowStart: string
+  windowEnd: string
+  tokens_used: number
+}
+
 interface QuotaData {
   name: string
   model: string
@@ -76,6 +82,17 @@ function fmtDate(iso: string) {
   }).format(d)
 }
 
+/** Time only, Indonesian, GMT+7. e.g. "14.30" */
+function fmtTime(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return "-"
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: TZ_JAKARTA,
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(d)
+}
+
 function parseUTCish(iso: string): number {
   if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
     return new Date(iso + "Z").getTime()
@@ -102,6 +119,8 @@ export default function App() {
   const [appName, setAppName] = useState("LLM Quota")
   const [data, setData] = useState<QuotaData | null>(null)
   const [history, setHistory] = useState<HistoryDay[]>([])
+  const [windowHistory, setWindowHistory] = useState<WindowPoint[]>([])
+  const [chartMode, setChartMode] = useState<"daily" | "windows">("daily")
   const [status, setStatus] = useState<Status>("loading")
   const [error, setError] = useState("")
   const [hoverDate, setHoverDate] = useState<string | null>(null)
@@ -142,6 +161,16 @@ export default function App() {
     }
   }, [])
 
+  const loadWindowHistory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/window-history")
+      if (!res.ok) return
+      setWindowHistory(await res.json())
+    } catch {
+      /* chart is optional; don't fail the page on it */
+    }
+  }, [])
+
   const checkQuota = useCallback(async () => {
     setStatus("loading")
     setError("")
@@ -161,12 +190,21 @@ export default function App() {
     loadConfig()
     checkQuota()
     loadHistory()
+    loadWindowHistory()
     const id = setInterval(() => {
       checkQuota()
       loadHistory()
+      loadWindowHistory()
     }, 60000)
     return () => clearInterval(id)
-  }, [checkQuota, loadHistory, loadConfig])
+  }, [checkQuota, loadHistory, loadWindowHistory, loadConfig])
+
+  /** Switch chart range; clear hover/pin so a tooltip never survives the mode. */
+  const switchChartMode = useCallback((mode: "daily" | "windows") => {
+    setChartMode(mode)
+    setHoverDate(null)
+    setPinDate(null)
+  }, [])
 
   const pct = data && data.limit > 0 ? (data.used / data.limit) * 100 : 0
   const pctFixed = pct.toFixed(2)
@@ -191,23 +229,51 @@ export default function App() {
 
   const today = todayJakarta()
   const todayTokens = history.find(d => d.log_date === today)?.tokens_used ?? 0
-  const max = Math.max(1, ...history.map(d => d.tokens_used))
+
+  // Chart series for the active mode. Daily = 30 days of token deltas; windows
+  // = the last 34 5h quota windows. `key` drives hover/pin state; `title`/`sub`
+  // are the tooltip lines. A window end of 0 (epoch) means unknown — omit it.
+  const series = useMemo(() => {
+    if (chartMode === "windows") {
+      return windowHistory.map(d => {
+        const endTs = new Date(d.windowEnd).getTime()
+        const range =
+          endTs > 0 ? `${fmtTime(d.windowStart)}–${fmtTime(d.windowEnd)} · ` : ""
+        return {
+          key: d.windowStart,
+          value: d.tokens_used,
+          title: fmtDateTime(d.windowStart),
+          sub: `${range}${fmtShort(d.tokens_used)} tokens`,
+        }
+      })
+    }
+    return history.map(d => ({
+      key: d.log_date,
+      value: d.tokens_used,
+      title: fmtDate(d.log_date),
+      sub: `${fmtShort(d.tokens_used)} tokens · ${fmtTokens(d.requests)} req`,
+    }))
+  }, [chartMode, history, windowHistory])
+  const max = Math.max(1, ...series.map(d => d.value))
+  // "Today" gets the emphasis dot in daily mode; in window mode the newest
+  // point (the live-growing current window) takes its place.
+  const emphasisKey = chartMode === "windows" ? (series.at(-1)?.key ?? null) : today
 
   // Chart geometry in percent units. `y` is the SVG y (0 = top); `h` is the
   // height above baseline used by the HTML dot layer. x sits at hit-target
   // centers ((i + 0.5) / n) so dots align exactly with the button columns.
   const points = useMemo(
     () =>
-      history.map((d, i) => {
-        const h = Math.max((d.tokens_used / max) * 100, 1.5)
+      series.map((d, i) => {
+        const h = Math.max((d.value / max) * 100, 1.5)
         return {
-          log_date: d.log_date,
-          x: ((i + 0.5) / history.length) * 100,
+          ...d,
+          x: ((i + 0.5) / series.length) * 100,
           y: 100 - h,
           h,
         }
       }),
-    [history, max],
+    [series, max],
   )
   const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x} ${p.y}`).join(" ")
   const areaPath =
@@ -431,16 +497,33 @@ export default function App() {
 
             {/* 30-day chart */}
             <GlassCard className="col-span-2 md:col-span-8" revealDelay={240} innerClassName="p-3 sm:p-6">
-              <div className="flex items-baseline justify-between">
-                <p className="eyebrow text-card-foreground/65">Daily usage</p>
-                <p className="text-xs text-card-foreground/70 sm:text-sm">30 days</p>
+              <div className="flex items-center justify-between">
+                <p className="eyebrow text-card-foreground/65">Usage</p>
+                <div className="flex items-center gap-1" role="group" aria-label="Chart range">
+                  {(["daily", "windows"] as const).map(m => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => switchChartMode(m)}
+                      aria-pressed={chartMode === m}
+                      className={cn(
+                        "spring eyebrow glass-pill rounded-full px-2.5 py-1 transition-colors",
+                        chartMode === m
+                          ? "text-card-foreground"
+                          : "text-card-foreground/45 hover:text-card-foreground/80",
+                      )}
+                    >
+                      {m === "daily" ? "Daily" : "5-Hours windows"}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div
                 ref={chartRef}
                 className="relative mt-3 h-20 sm:mt-4 sm:h-28"
                 onMouseLeave={() => setHoverDate(null)}
               >
-                {history.length === 0 ? (
+                {series.length === 0 ? (
                   <div className="flex h-full items-end">
                     <span className="text-sm text-card-foreground/60">No data yet</span>
                   </div>
@@ -477,9 +560,9 @@ export default function App() {
                     {/* Dots + hairline (HTML layer, no pointer events) */}
                     <div className="pointer-events-none absolute inset-0">
                       {points.map(p => {
-                        const isOpen = hoverDate === p.log_date || pinDate === p.log_date
+                        const isOpen = hoverDate === p.key || pinDate === p.key
                         return (
-                          <span key={p.log_date}>
+                          <span key={p.key}>
                             {isOpen && (
                               <span
                                 className="absolute bottom-0 w-px bg-card-foreground/20"
@@ -491,7 +574,7 @@ export default function App() {
                                 "spring absolute block rounded-full",
                                 isOpen
                                   ? "size-2 bg-card-foreground ring-2 ring-card-foreground/20"
-                                  : p.log_date === today
+                                  : p.key === emphasisKey
                                     ? "size-1 bg-card-foreground"
                                     : "size-1 bg-card-foreground/35",
                               )}
@@ -507,19 +590,19 @@ export default function App() {
                     </div>
                     {/* Hit targets */}
                     <div className="flex h-full">
-                      {history.map((d, i) => {
-                        const isOpen = hoverDate === d.log_date || pinDate === d.log_date
+                      {series.map((d, i) => {
+                        const isOpen = hoverDate === d.key || pinDate === d.key
                         return (
                           <button
-                            key={d.log_date}
+                            key={d.key}
                             type="button"
                             className="relative h-full flex-1 cursor-pointer outline-none"
-                            onMouseEnter={() => setHoverDate(d.log_date)}
+                            onMouseEnter={() => setHoverDate(d.key)}
                             onMouseLeave={() => setHoverDate(null)}
-                            onFocus={() => setHoverDate(d.log_date)}
+                            onFocus={() => setHoverDate(d.key)}
                             onBlur={() => setHoverDate(null)}
-                            onClick={() => setPinDate(p => (p === d.log_date ? null : d.log_date))}
-                            aria-label={`${fmtDate(d.log_date)}, ${fmtShort(d.tokens_used)} tokens, ${fmtTokens(d.requests)} requests`}
+                            onClick={() => setPinDate(p => (p === d.key ? null : d.key))}
+                            aria-label={`${d.title}, ${d.sub}`}
                           >
                             <span
                               role="tooltip"
@@ -528,15 +611,13 @@ export default function App() {
                                 isOpen ? "opacity-100" : "opacity-0",
                                 i === 0
                                   ? "left-0"
-                                  : i === history.length - 1
+                                  : i === series.length - 1
                                     ? "right-0"
                                     : "left-1/2 -translate-x-1/2",
                               )}
                             >
-                              <span className="block">{fmtDate(d.log_date)}</span>
-                              <span className="block">
-                                {fmtShort(d.tokens_used)} tokens · {fmtTokens(d.requests)} req
-                              </span>
+                              <span className="block">{d.title}</span>
+                              <span className="block">{d.sub}</span>
                             </span>
                           </button>
                         )

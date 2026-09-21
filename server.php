@@ -25,6 +25,11 @@ if ($path === '/api/history') {
     exit(json_encode(history()));
 }
 
+if ($path === '/api/window-history') {
+    header('Content-Type: application/json');
+    exit(json_encode(windowHistory((int)($_GET['n'] ?? 34))));
+}
+
 if ($path === '/api/config') {
     header('Content-Type: application/json');
     exit(json_encode(['appName' => appName()]));
@@ -240,6 +245,7 @@ function pollQuota(bool $fireAlerts = false): array
 function processGoodPoll(array $q, bool $fireAlerts): string
 {
     logDaily($q['totalLifetime'], $q['totalRequests']);
+    logWindow($q);
     // Alerts + TPM logging fire only from the cron poller (fireAlerts=true),
     // never from the browser-driven /api/stats route — eliminates races
     // between concurrent cron + dashboard polls that caused duplicate msgs.
@@ -292,12 +298,57 @@ function logDaily(int $lifetimeTokens, int $requests): void
     }
 }
 
+/**
+ * Log this poll's 5h-window token usage keyed by the window start (unix
+ * seconds). Upstream `used` is monotone within a window and resets to 0 when
+ * the window rolls, so per-window usage = max observed used-in-window — the
+ * GREATEST() upsert is idempotent and race-safe across concurrent
+ * cron/dashboard polls, and can't double-count. Skips silently when the
+ * upstream window-start timestamp is missing/unparseable; a missing/unparseable
+ * window end is stored as 0.
+ */
+function logWindow(array $q): void
+{
+    $start = $q['windowStart'] !== '' ? strtotime($q['windowStart']) : false;
+    if ($start === false) return;
+    $end = $q['windowEnd'] !== '' ? (strtotime($q['windowEnd']) ?: 0) : 0;
+    $stmt = db()->prepare(
+        'INSERT INTO token_window_log (window_start, window_end, tokens_used) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           window_end  = GREATEST(window_end,  VALUES(window_end)),
+           tokens_used = GREATEST(tokens_used, VALUES(tokens_used))'
+    );
+    $stmt->execute([(string)$start, (string)$end, $q['used']]);
+}
+
 function history(int $days = 30): array
 {
     $pdo = db();
     $stmt = $pdo->prepare('SELECT log_date, tokens_used, requests FROM token_daily_log WHERE log_date >= ? ORDER BY log_date ASC');
     $stmt->execute([date('Y-m-d', strtotime("-" . ($days - 1) . " days"))]);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+/**
+ * Usage history for the last N 5h quota windows (default 34 ≈ 7 days),
+ * ascending by window start. Timestamps are ISO-8601; a window end of 0
+ * serializes as the epoch so clients can omit it.
+ */
+function windowHistory(int $n = 34): array
+{
+    $n = max(1, min(200, $n));
+    // $n is a clamped int, so it interpolates safely (LIMIT can't take a
+    // string bind under native prepares).
+    $stmt = db()->query("SELECT window_start, window_end, tokens_used FROM token_window_log ORDER BY window_start DESC LIMIT $n");
+    $rows = array_reverse($stmt->fetchAll(PDO::FETCH_ASSOC));
+    return array_map(
+        fn(array $r): array => [
+            'windowStart' => date('c', (int)$r['window_start']),
+            'windowEnd'   => date('c', (int)$r['window_end']),
+            'tokens_used' => (int)$r['tokens_used'],
+        ],
+        $rows
+    );
 }
 
 /**
@@ -535,7 +586,7 @@ function replenishPingUrl(): string
 
 /**
  * Replenish ping: when the window is exhausted and wall-clock has passed the
- * known window end, fire ONE 1-token completion. /stats is read-only — the
+ * exhausted window's own end, fire ONE 1-token completion. /stats is read-only — the
  * upstream window only rolls on a real request, so without this the 🟢 alert
  * waits for organic usage that may never come. Cron poller only. Throttled to
  * one attempt per 5 min so a dead upstream can't stack curl timeouts every
@@ -554,10 +605,21 @@ function maybeReplenishPing(array $q): bool
 
     $pdo = db();
 
-    // Boundary: only after the known window end has passed.
-    $raw = $pdo->query('SELECT known_window_end FROM alert_state WHERE id = 1')->fetchColumn();
-    $knownEnd = (is_string($raw) && ctype_digit($raw)) ? (int)$raw : 0;
-    if ($knownEnd === 0 || time() < $knownEnd) return false;
+    // Boundary: gate on the upstream-reported window end — the exhausted
+    // window's own end, exactly what the ping waits for. known_window_end is
+    // unusable here: on boundary ticks maybeAlertResetNow() runs first on the
+    // same poll and projects it forward to the NEXT future boundary, so a gate
+    // on it never opens. It also works from the stale cache (cached windowEnd
+    // is the old window's end) and on cold starts. Fall back to the DB value
+    // only when windowEnd is missing/unparseable.
+    $endTs = ($q['windowEnd'] ?? '') !== '' ? strtotime($q['windowEnd']) : false;
+    if ($endTs !== false) {
+        if (time() < $endTs) return false;
+    } else {
+        $raw = $pdo->query('SELECT known_window_end FROM alert_state WHERE id = 1')->fetchColumn();
+        $knownEnd = (is_string($raw) && ctype_digit($raw)) ? (int)$raw : 0;
+        if ($knownEnd === 0 || time() < $knownEnd) return false;
+    }
 
     // Throttle: one attempt per 5 minutes (success OR failure).
     $rawTs = $pdo->query('SELECT last_ping_ts FROM alert_state WHERE id = 1')->fetchColumn();
@@ -584,6 +646,8 @@ function maybeReplenishPing(array $q): bool
     curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
+    // One STDERR line per attempt — lands in the cron log via bin/poll.php.
+    fwrite(STDERR, '[' . date('c') . "] replenish ping -> HTTP {$status}\n");
     return $status >= 200 && $status < 300;
 }
 

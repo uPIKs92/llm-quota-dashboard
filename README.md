@@ -12,8 +12,9 @@ serves the pre-built SPA.
 ## Features
 
 - **Provider-agnostic** — works with any upstream returning JSON via a config-driven field map.
-- **Live dashboard** — usage progress, reset countdown, daily 7-day chart.
+- **Live dashboard** — usage progress, reset countdown, usage chart with Daily / 5h-windows toggle.
 - **Daily history** — token deltas logged to MySQL, anchored per day.
+- **5h-window history** — tokens consumed per quota window, chartable for the last 34 windows (~7 days).
 - **Telegram alerts** — usage milestones (25/50/75/90%), reset-soon, reset-done.
 - **Telegram bot** — `/quota`, `/reset`, `/help` (prefix configurable).
 - **Dark/light theme** with anti-FOUC persistence.
@@ -229,6 +230,7 @@ npm run dev             # frontend at :5173
 |---|---|---|
 | `/api/stats` | GET | Normalized quota (proxied + mapped from upstream) |
 | `/api/history` | GET | Daily token log (last 30 days) |
+| `/api/window-history` | GET | Token usage per 5h quota window (`?n=`, 1–200, default 34) |
 | `/api/config` | GET | `{ "appName": "..." }` |
 | `/api/tg/webhook` | POST | Telegram webhook receiver |
 

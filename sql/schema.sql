@@ -54,6 +54,17 @@ ALTER TABLE `alert_state`
 ALTER TABLE `alert_state`
   ADD COLUMN IF NOT EXISTS `last_ping_ts` bigint(20) NOT NULL DEFAULT 0;
 
+-- One row per 5h quota window; tokens_used = max observed used-in-window.
+-- Unix-seconds PK mirrors the alert_state dedup-key convention (timestamp
+-- format drift can't duplicate rows). No pruning — ~5 rows/day is negligible.
+CREATE TABLE IF NOT EXISTS `token_window_log` (
+  `window_start`  bigint(20)   NOT NULL,          -- unix seconds of window_started_at
+  `window_end`    bigint(20)   NOT NULL DEFAULT 0,
+  `tokens_used`   bigint(20)   NOT NULL DEFAULT 0,
+  `updated_at`    timestamp    NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`window_start`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- One row per minute of cumulative lifetime-token counts, used to derive the
 -- tokens-per-minute rate. Pruned to the last 24h by the poller. Idempotent.
 CREATE TABLE IF NOT EXISTS `token_minute_log` (
