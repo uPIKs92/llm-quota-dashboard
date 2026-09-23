@@ -93,6 +93,29 @@ function fmtTime(iso: string) {
   }).format(d)
 }
 
+/** Day + short month, Indonesian, GMT+7. e.g. "23 Sep" */
+function fmtDayMonth(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso || "-"
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: TZ_JAKARTA,
+    day: "numeric",
+    month: "short",
+  }).format(d)
+}
+
+/** Calendar-day key in Jakarta tz (YYYY-MM-DD), for day-change comparison. */
+function dayKeyJakarta(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ""
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ_JAKARTA,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d)
+}
+
 function parseUTCish(iso: string): number {
   if (!/[zZ]$/.test(iso) && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
     return new Date(iso + "Z").getTime()
@@ -237,13 +260,12 @@ export default function App() {
     if (chartMode === "windows") {
       return windowHistory.map(d => {
         const endTs = new Date(d.windowEnd).getTime()
-        const range =
-          endTs > 0 ? `${fmtTime(d.windowStart)}–${fmtTime(d.windowEnd)} · ` : ""
+        const endTime = endTs > 0 ? `–${fmtTime(d.windowEnd)}` : ""
         return {
           key: d.windowStart,
           value: d.tokens_used,
-          title: fmtDateTime(d.windowStart),
-          sub: `${range}${fmtShort(d.tokens_used)} tokens`,
+          title: `${fmtDayMonth(d.windowStart)} · ${fmtTime(d.windowStart)}${endTime}`,
+          sub: `${fmtShort(d.tokens_used)} tokens`,
         }
       })
     }
@@ -280,6 +302,28 @@ export default function App() {
     points.length > 1
       ? `${linePath} L${points[points.length - 1].x} 100 L${points[0].x} 100 Z`
       : ""
+
+  // X-axis ticks (window mode only): ~6 indices spread evenly over the series,
+  // first and last always included. A tick whose Jakarta day differs from the
+  // previous tick's shows the day marker instead of the time, so a week of
+  // windows stays navigable. Empty in daily mode (labels are windows-only).
+  const xTicks = useMemo(() => {
+    if (chartMode !== "windows" || windowHistory.length < 2) return []
+    const n = windowHistory.length
+    const idx = [...new Set(Array.from({ length: 6 }, (_, k) => Math.round((k * (n - 1)) / 5)))]
+      .sort((a, b) => a - b)
+    return idx.map((i, pos) => {
+      const d = windowHistory[i]
+      const prev = pos > 0 ? windowHistory[idx[pos - 1]] : null
+      const dayChanged = prev === null || dayKeyJakarta(d.windowStart) !== dayKeyJakarta(prev.windowStart)
+      return {
+        key: d.windowStart,
+        x: ((i + 0.5) / n) * 100,
+        label: dayChanged ? fmtDayMonth(d.windowStart) : fmtTime(d.windowStart),
+        edge: pos === 0 ? "left" : pos === idx.length - 1 ? "right" : "center",
+      }
+    })
+  }, [chartMode, windowHistory])
 
   const statusDotColor: string =
     status === "ok"
@@ -626,6 +670,25 @@ export default function App() {
                   </>
                 )}
               </div>
+              {xTicks.length > 0 && (
+                <div className="pointer-events-none relative mt-1.5 h-4 text-[10px] tabular-nums text-card-foreground/45">
+                  {xTicks.map(t => (
+                    <span
+                      key={t.key}
+                      className="absolute top-0 whitespace-nowrap"
+                      style={
+                        t.edge === "left"
+                          ? { left: `${t.x}%` }
+                          : t.edge === "right"
+                            ? { right: `${100 - t.x}%` }
+                            : { left: `${t.x}%`, transform: "translateX(-50%)" }
+                      }
+                    >
+                      {t.label}
+                    </span>
+                  ))}
+                </div>
+              )}
             </GlassCard>
           </div>
         )}

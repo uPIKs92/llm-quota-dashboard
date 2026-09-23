@@ -210,7 +210,7 @@ function pollQuota(bool $fireAlerts = false): array
         $cached = readCachedStats();
         if ($cached !== null) {
             if ($fireAlerts) {
-                maybeAlertResetNow($cached['windowStart'] ?? '', $cached['windowEnd'] ?? '');
+                maybeAlertResetNow($cached);
             }
             $cached['tpm'] = readTpm();
             $cached['stale'] = true;
@@ -219,11 +219,13 @@ function pollQuota(bool $fireAlerts = false): array
         }
     }
 
-    // Replenish ping (cron only): exhausted + boundary passed. One 1-token
-    // completion rolls the upstream window even with zero organic usage — the
-    // /stats endpoint is read-only, only a real completion starts the next
-    // window. Immediate re-poll picks up fresh quota so the 🟢 replenish alert
-    // fires this tick instead of waiting for the next request.
+    // Replenish ping (cron only): one 1-token completion at EVERY genuine 5h
+    // window boundary materializes the new upstream window — /stats is
+    // read-only, so with no request since the last boundary the upstream keeps
+    // reporting a sliding phantom window (used = 0). The ping counts ping
+    // tokens into the fresh window, so the hero card + window chart show real
+    // data. Immediate re-poll picks up the materialized window so the 🟢
+    // replenish alert (exhausted windows) fires this tick.
     if ($fireAlerts && $code === 200 && $body) {
         $q = json_decode($body, true);
         if (is_array($q) && maybeReplenishPing($q)) {
@@ -252,7 +254,7 @@ function processGoodPoll(array $q, bool $fireAlerts): string
     if ($fireAlerts) {
         logTpm($q['totalLifetime']); // computes + stores current_tpm
         maybeAlertReset($q['windowEnd']);
-        maybeAlertResetNow($q['windowStart'], $q['windowEnd']);
+        maybeAlertResetNow($q);
         maybeAlertReplenish($q);
         maybeAlertUsage($q);
     }
@@ -303,12 +305,16 @@ function logDaily(int $lifetimeTokens, int $requests): void
  * seconds). Upstream `used` is monotone within a window and resets to 0 when
  * the window rolls, so per-window usage = max observed used-in-window — the
  * GREATEST() upsert is idempotent and race-safe across concurrent
- * cron/dashboard polls, and can't double-count. Skips silently when the
+ * cron/dashboard polls, and can't double-count. Windows with used == 0 are
+ * never logged: while the API is idle the upstream reports a sliding phantom
+ * window (used = 0, read-time timestamps), which would otherwise fill the
+ * table with junk rows and flatten the window chart. Skips silently when the
  * upstream window-start timestamp is missing/unparseable; a missing/unparseable
  * window end is stored as 0.
  */
 function logWindow(array $q): void
 {
+    if ((int)($q['used'] ?? 0) === 0) return; // phantom window (or truly unused) — never log
     $start = $q['windowStart'] !== '' ? strtotime($q['windowStart']) : false;
     if ($start === false) return;
     $end = $q['windowEnd'] !== '' ? (strtotime($q['windowEnd']) ?: 0) : 0;
@@ -426,24 +432,33 @@ function readTpm(): int
  *
  * The boundary-cross check runs BEFORE reconciling from upstream, so ✅ still
  * fires when a usage hit rolled the upstream window (upstream then reports a
- * newer end). Reconcile previously ran first, advancing known_window_end past the
- * boundary so the cross-check saw a future date and returned early — silently
- * dropping ✅ whenever usage rolled the window at/around reset time.
+ * newer end). Reconcile previously ran first, advancing known_window_end past
+ * the boundary so the cross-check saw a future date and returned early —
+ * silently dropping ✅ whenever usage rolled the window at/around reset time.
  *
- * alert_state.known_window_end stores the last authoritative window-end (unix
- * seconds, as a string). On each fire it is projected forward by one window
- * duration (skipping catch-up windows, snapping to upstream when upstream is
- * ahead) so only one ✅ sends per genuine reset.
+ * On a genuine boundary cross this also stamps ping_due_boundary (the crossed
+ * knownEnd) so maybeReplenishPing() fires exactly ONE "hi" completion per
+ * boundary — materializing the new window so /stats stops reporting a sliding
+ * phantom (used=0) window. The flag survives a send failure (the boundary was
+ * real); only known_window_end is reverted on failure.
+ *
+ * known_window_end stores the last authoritative window-end (unix seconds).
+ * On each cross it is projected forward by one window duration (skipping
+ * catch-up windows, snapping to upstream when upstream is ahead) so only one ✅
+ * sends per genuine reset.
+ *
+ * $q needs: windowStart, windowEnd, used. See normalizeQuota().
  */
-function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
+function maybeAlertResetNow(array $q): void
 {
     $e = env();
     $bot = $e['TELEGRAM_BOT_TOKEN'] ?? '';
     $chat = $e['TELEGRAM_CHAT_ID'] ?? '';
     if (!$bot || !$chat) return;
 
-    $start = $windowStartedAt !== '' ? strtotime($windowStartedAt) : false;
-    $end = $windowEndsAt !== '' ? strtotime($windowEndsAt) : false;
+    $start = $q['windowStart'] !== '' ? strtotime($q['windowStart']) : false;
+    $end = $q['windowEnd'] !== '' ? strtotime($q['windowEnd']) : false;
+    $used = (int)($q['used'] ?? 0);
 
     $pdo = db();
 
@@ -456,6 +471,19 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
         $s = (string)$raw;
         $knownEnd = ctype_digit($s) ? (int)$s : (int)strtotime($s);
         $prevBind = $s;
+    }
+
+    // Cold-start bootstrap (one time): seed known_window_end from the first
+    // reported end so boundary detection has a reference. Phantom (used==0)
+    // OK here — after this only materialized windows move it.
+    if ($knownEnd === 0 && $end !== false && $end > 0) {
+        $claim = $pdo->prepare(
+            'UPDATE alert_state SET known_window_end = ?
+             WHERE id = 1 AND known_window_end <=> ?'
+        );
+        $claim->execute([(string)$end, $prevBind]);
+        $knownEnd = $end;
+        $prevBind = (string)$end;
     }
 
     if ($knownEnd === 0) return; // nothing known yet — wait for the first real poll
@@ -473,7 +501,8 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
         // Race-safe claim: project known_window_end forward. Skip past any catch-up
         // windows (e.g. after downtime) so only one ✅ sends, then advance to the
         // next future boundary. If upstream already reports a newer end, snap to it
-        // (don't project past the real window). Conditional UPDATE => one poll wins.
+        // (don't project past the real window). ping_due_boundary records the
+        // boundary that was just crossed so the replenish ping fires once.
         $nextEnd = $knownEnd + $duration;
         if ($end && $end > $knownEnd) {
             $nextEnd = max($nextEnd, $end);
@@ -482,10 +511,10 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
             $nextEnd += $duration;
         }
         $claim = $pdo->prepare(
-            'UPDATE alert_state SET known_window_end = ?
+            'UPDATE alert_state SET known_window_end = ?, ping_due_boundary = ?
              WHERE id = 1 AND known_window_end <=> ?'
         );
-        $claim->execute([(string)$nextEnd, $prevBind]);
+        $claim->execute([(string)$nextEnd, (string)$knownEnd, $prevBind]);
         if ($claim->rowCount() === 1) {
             // When the ending window was exhausted and the replenish ping is
             // enabled, skip ✅ — the ping rolls the window and the 🟢 replenish
@@ -503,7 +532,8 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
                 . "Elapsed: {$elapsedMin} min ago";
 
             if (!tgSend($text)) {
-                // Send failed — revert the projection so the next poll retries.
+                // Send failed — revert known_window_end so the next poll retries.
+                // ping_due_boundary is intentionally left set (the boundary was real).
                 $release = $pdo->prepare('UPDATE alert_state SET known_window_end = ? WHERE id = 1');
                 $release->execute([$prevBind]);
             }
@@ -511,15 +541,21 @@ function maybeAlertResetNow(string $windowStartedAt, string $windowEndsAt): void
         return; // boundary handled (or lost the race) — done for this poll
     }
 
-    // --- reconcile: upstream is authoritative when it reports a newer end but the
-    // known boundary hasn't been crossed yet (e.g. the upstream window shifted
-    // forward without wall-clock passing the old end). Silent advance, no alert. ---
-    if ($end && $end > $knownEnd) {
-        $claim = $pdo->prepare(
-            'UPDATE alert_state SET known_window_end = ?
-             WHERE id = 1 AND known_window_end <=> ?'
-        );
-        $claim->execute([(string)$end, $prevBind]);
+    // --- reconcile (no-cross): only advance/repair from materialized windows ---
+    // A materialized window's (used > 0) end is authoritative — it both advances
+    // on roll and backward-corrects pre-deploy drift from phantom snaps. Phantom
+    // (used == 0) windows never move known_window_end (except the cold-start
+    // bootstrap above), which locks the grid to real boundaries.
+    if ($end !== false) {
+        if ($used > 0 && (int)$end !== $knownEnd) {
+            // Race-safe claim on the previous value; forward or backward snap both
+            // go through the same conditional UPDATE.
+            $claim = $pdo->prepare(
+                'UPDATE alert_state SET known_window_end = ? WHERE id = 1 AND known_window_end <=> ?'
+            );
+            $claim->execute([(string)$end, $prevBind]);
+        }
+        // used == 0 (phantom): leave known_window_end untouched
     }
 }
 
@@ -585,40 +621,57 @@ function replenishPingUrl(): string
 }
 
 /**
- * Replenish ping: when the window is exhausted and wall-clock has passed the
- * exhausted window's own end, fire ONE 1-token completion. /stats is read-only — the
- * upstream window only rolls on a real request, so without this the 🟢 alert
- * waits for organic usage that may never come. Cron poller only. Throttled to
- * one attempt per 5 min so a dead upstream can't stack curl timeouts every
- * minute. Returns true when the completion was accepted — the caller re-polls
- * immediately so 🟢 fires on this tick.
+ * Replenish ping: fire ONE 1-token completion ("hi") at every genuine 5h
+ * window boundary. /stats is read-only — when no request has hit the API
+ * since the last boundary, the upstream keeps reporting a sliding phantom
+ * window (used = 0, timestamps advance on every poll); a real completion
+ * materializes the new window so its start/end stabilize and its tokens are
+ * counted instead of refreshing to 0. Candidate trigger: the
+ * ping_due_boundary flag stamped by maybeAlertResetNow() on a boundary cross,
+ * else (legacy fallback) a reported windowEnd already past — still correct
+ * for lazy upstreams, harmless under sliding-phantom behavior. Skipped when
+ * organic usage already materialized the new window. Cron poller only.
+ * Throttled to one attempt per 5 min so a dead upstream can't stack curl
+ * timeouts every minute. Returns true when the completion was accepted — the
+ * caller re-polls immediately so the materialized window is logged/alerted
+ * on this tick.
  */
 function maybeReplenishPing(array $q): bool
 {
-    $limit = (int)($q['limit'] ?? 0);
-    if ($limit <= 0) return false;
-    if ((int)($q['remaining'] ?? 1) > 0 && (int)($q['used'] ?? 0) < $limit) return false; // not exhausted
-
     $url = replenishPingUrl();
     $key = apiKey();
     if ($url === '' || $key === '') return false;
 
     $pdo = db();
 
-    // Boundary: gate on the upstream-reported window end — the exhausted
-    // window's own end, exactly what the ping waits for. known_window_end is
-    // unusable here: on boundary ticks maybeAlertResetNow() runs first on the
-    // same poll and projects it forward to the NEXT future boundary, so a gate
-    // on it never opens. It also works from the stale cache (cached windowEnd
-    // is the old window's end) and on cold starts. Fall back to the DB value
-    // only when windowEnd is missing/unparseable.
-    $endTs = ($q['windowEnd'] ?? '') !== '' ? strtotime($q['windowEnd']) : false;
-    if ($endTs !== false) {
-        if (time() < $endTs) return false;
-    } else {
-        $raw = $pdo->query('SELECT known_window_end FROM alert_state WHERE id = 1')->fetchColumn();
-        $knownEnd = (is_string($raw) && ctype_digit($raw)) ? (int)$raw : 0;
-        if ($knownEnd === 0 || time() < $knownEnd) return false;
+    // Candidate boundary: the flag set by maybeAlertResetNow() when wall-clock
+    // crossed a genuine boundary (works under sliding-phantom behavior, where
+    // the reported windowEnd is always future). Legacy fallback: the reported
+    // windowEnd itself, when it's parseable and already past.
+    $boundary = 0;
+    $flagBind = null;
+    $raw = $pdo->query('SELECT ping_due_boundary FROM alert_state WHERE id = 1')->fetchColumn();
+    if (is_numeric($raw) && (int)$raw > 0) {
+        $flagBind = (string)$raw;
+        $boundary = (int)$raw;
+    }
+    if ($boundary === 0) {
+        $endTs = ($q['windowEnd'] ?? '') !== '' ? strtotime($q['windowEnd']) : false;
+        if ($endTs === false || time() < $endTs) return false;
+        $boundary = $endTs;
+    } elseif ((int)($q['used'] ?? 0) > 0) {
+        // Skip when organic usage already materialized this boundary's window:
+        // window started at/after the crossed boundary with real usage. Phantom
+        // windows (used = 0) never satisfy this, so the ping still fires when
+        // actually needed. Race-safe clear only if the flag still holds.
+        $startTs = ($q['windowStart'] ?? '') !== '' ? strtotime($q['windowStart']) : false;
+        if ($startTs !== false && $startTs >= $boundary) {
+            $clear = $pdo->prepare(
+                'UPDATE alert_state SET ping_due_boundary = NULL WHERE id = 1 AND ping_due_boundary = ?'
+            );
+            $clear->execute([$flagBind]);
+            return false;
+        }
     }
 
     // Throttle: one attempt per 5 minutes (success OR failure).
@@ -647,7 +700,15 @@ function maybeReplenishPing(array $q): bool
     $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     // One STDERR line per attempt — lands in the cron log via bin/poll.php.
-    fwrite(STDERR, '[' . date('c') . "] replenish ping -> HTTP {$status}\n");
+    fwrite(STDERR, '[' . date('c') . "] replenish ping (boundary {$boundary}) -> HTTP {$status}\n");
+    if ($status >= 200 && $status < 300 && $flagBind !== null) {
+        // Accepted — clear the flag so this boundary pings exactly once
+        // (conditional UPDATE: only if it still holds this same boundary).
+        $clear = $pdo->prepare(
+            'UPDATE alert_state SET ping_due_boundary = NULL WHERE id = 1 AND ping_due_boundary = ?'
+        );
+        $clear->execute([$flagBind]);
+    }
     return $status >= 200 && $status < 300;
 }
 

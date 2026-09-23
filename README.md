@@ -79,6 +79,19 @@ All config lives in `.env`. Copy `.env.example` and fill it in.
 | `WEBHOOK_URL` | Public HTTPS base for webhook (optional) |
 | `TELEGRAM_WEBHOOK_SECRET` | Secret token for webhook verification (optional) |
 
+### Replenish ping
+
+| Variable | Description | Default |
+|---|---|---|
+| `REPLENISH_PING_URL` | Completions endpoint for the boundary ping | derived: `UPSTREAM_URL` minus `/stats` + `/v1/chat/completions` |
+
+At every 5h window boundary the cron poller fires ONE tiny completion
+(`"hi"`, `max_tokens: 1`) so the upstream materializes the new quota window
+immediately — with no request since the last boundary, the usage endpoint
+keeps reporting a sliding zero window instead of the fresh one. The ping
+consumes ~1-2 tokens per boundary. Set `REPLENISH_PING_URL=off` (or `0`) to
+disable it.
+
 ### Field map (point at your provider)
 
 The dashboard reads a **canonical shape** from the upstream response. By default

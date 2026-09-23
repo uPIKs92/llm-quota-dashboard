@@ -37,6 +37,14 @@ ALTER TABLE `alert_state`
 ALTER TABLE `alert_state`
   ADD COLUMN IF NOT EXISTS `current_tpm` int(11) NOT NULL DEFAULT 0;
 
+-- Unix ts of the most recent genuine 5h window boundary that still needs its
+-- replenish ping — one "hi" completion materializes the new window so /stats
+-- stops reporting a sliding phantom (used=0) window. Set by maybeAlertResetNow()
+-- on boundary cross, cleared by maybeReplenishPing() on success. NULL when no
+-- boundary awaits. Idempotent.
+ALTER TABLE `alert_state`
+  ADD COLUMN IF NOT EXISTS `ping_due_boundary` bigint(20) DEFAULT NULL;
+
 -- Last good normalized upstream payload (JSON). Served flagged stale when the
 -- upstream fails (exhausted key, proxy down) so the dashboard keeps rendering
 -- the replenish countdown instead of an empty page. Idempotent.
@@ -49,8 +57,8 @@ ALTER TABLE `alert_state`
   ADD COLUMN IF NOT EXISTS `was_exhausted` tinyint(1) NOT NULL DEFAULT 0;
 
 -- Unix ts of the last replenish-ping attempt (success or failure). One 1-token
--- completion is fired when exhausted + boundary passed, to roll the upstream
--- window so the 🟢 alert doesn't wait for organic usage. Throttled to 5 min.
+-- completion is fired at every genuine 5h boundary to materialize the new
+-- upstream window (see ping_due_boundary). Throttled to 5 min.
 ALTER TABLE `alert_state`
   ADD COLUMN IF NOT EXISTS `last_ping_ts` bigint(20) NOT NULL DEFAULT 0;
 
