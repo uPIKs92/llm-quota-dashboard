@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "description": "Realtime quota/usage dashboard for any LLM API, with daily history, Telegram alerts, and a Telegram bot.",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",

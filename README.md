@@ -309,4 +309,4 @@ npm run dev             # frontend at :5173
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)
