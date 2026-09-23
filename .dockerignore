@@ -1,0 +1,18 @@
+# Keep secrets out of the build context — .env above all.
+.env
+.env.*
+!.env.example
+
+# Not needed to build
+.git
+.github
+.kilo
+.idea
+.vscode
+node_modules
+dist
+docs
+sql
+logs
+*.log
+*.md

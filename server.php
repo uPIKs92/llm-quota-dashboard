@@ -62,12 +62,29 @@ if (php_sapi_name() !== 'cli') {
 
 /* ----------------------------- config helpers ----------------------------- */
 
-/** Parse and cache .env once per request/process. */
+/**
+ * Parse and cache .env once per request/process.
+ *
+ * Falls back to process environment variables (getenv-style, via $_ENV/$_SERVER)
+ * for any key the .env file doesn't define — lets container deployments (Docker
+ * Compose etc.) pass all config as env vars. The .env file wins when a key
+ * exists in both, so bare-metal setups are unaffected. Environment entries that
+ * are empty or contain dots (invalid in POSIX env names) are ignored.
+ */
 function env(): array
 {
     static $cache = null;
     if ($cache === null) {
-        $cache = parse_ini_file(__DIR__ . '/.env') ?: [];
+        $ini = __DIR__ . '/.env';
+        $cache = is_file($ini) ? (parse_ini_file($ini) ?: []) : [];
+        foreach (array_merge($_ENV, $_SERVER) as $key => $value) {
+            if (!is_string($key) || !is_string($value) || $value === '' || str_contains($key, '.')) {
+                continue;
+            }
+            if (!array_key_exists($key, $cache)) {
+                $cache[$key] = $value;
+            }
+        }
     }
     return $cache;
 }

@@ -12,6 +12,8 @@ serves the pre-built SPA.
 ## Features
 
 - **Provider-agnostic** — works with any upstream returning JSON via a config-driven field map.
+- **Installable PWA** — offline app shell + last-known API data via service worker caching; auto-updates.
+- **One-command Docker deploy** — web + MariaDB + every-minute poller via `docker compose up -d --build`.
 - **Live dashboard** — usage progress, reset countdown, usage chart with Daily / 5h-windows toggle.
 - **Daily history** — token deltas logged to MySQL, anchored per day.
 - **5h-window history** — tokens consumed per quota window, chartable for the last 34 windows (~7 days).
@@ -28,7 +30,7 @@ serves the pre-built SPA.
 ## Quick start
 
 ```sh
-git clone https://github.com/yourname/llm-quota-dashboard.git
+git clone https://github.com/uPIKs92/llm-quota-dashboard.git
 cd llm-quota-dashboard
 npm install
 npm run build          # outputs dist/
@@ -125,6 +127,52 @@ No code changes needed.
 
 ## Deployment
 
+### Docker (one command)
+
+The repo ships a `compose.yaml` with three services: `web` (Apache + PHP serving
+the SPA and API), `db` (MariaDB, schema auto-imported on first start), and
+`poller` (the every-minute cron loop — no host crontab needed).
+
+**From source:**
+
+```sh
+cp .env.example .env   # fill in UPSTREAM_URL, DB_PASSWORD, etc.
+docker compose up -d --build
+```
+
+**Prebuilt image** (no Node/PHP toolchain needed): the published image is
+`ghcr.io/upiks92/llm-quota-dashboard`. If you forked, change the `image:` lines
+in `compose.yaml` to your registry path, then:
+
+```sh
+cp .env.example .env   # fill in UPSTREAM_URL, DB_PASSWORD, etc.
+docker compose up -d
+```
+
+Then open `http://localhost:8080`. The dashboard listens on port `8080` by
+default — change the `ports:` mapping in `compose.yaml` if needed.
+
+Notes:
+
+- Config comes from `.env` (same file as bare-metal). Compose passes it to the
+  containers as environment variables; only `DB_HOST` is overridden to `db`.
+- The MariaDB container initializes the schema from `sql/schema.sql` on first
+  volume creation. Later schema changes: re-import manually
+  (`docker compose exec -T db mariadb -u quota_user -p... quota_dash < sql/schema.sql`)
+  or reset the volume (`docker compose down -v` — deletes history).
+- **PWA installability requires HTTPS or `localhost`** — `localhost:8080`
+  qualifies; a LAN IP needs a reverse proxy with TLS in front of the container.
+- The Telegram webhook needs a public HTTPS URL: put a reverse proxy (Caddy,
+  nginx + certbot, Cloudflare tunnel, …) in front of `:8080`, set
+  `WEBHOOK_URL=https://your-domain` + `TELEGRAM_WEBHOOK_SECRET` in `.env`, then
+  register it: `docker compose exec web php /var/www/html/bin/set-webhook.php`.
+- CLI helpers run inside the container:
+  `docker compose exec web php /var/www/html/bin/repair-daily.php`.
+
+Images are published automatically by GitHub Actions: `main` pushes a rolling
+`latest` (+ `edge-<sha>`); pushing a `vX.Y.Z` tag publishes `X.Y.Z`, `X.Y`, and
+`latest` for `linux/amd64` + `linux/arm64`.
+
 ### nginx + PHP-FPM
 
 Point the root at the project and route non-file requests to `server.php`:
@@ -191,7 +239,10 @@ Make sure `mod_rewrite` is enabled and `AllowOverride All` is set for the dir.
 ## Cron (alerts + daily logging)
 
 The dashboard polls upstream automatically when you load the page, but Telegram
-alerts and daily logging need a cron job running every minute:
+alerts and daily logging need a job running every minute. With Docker, the
+`poller` service already does this — nothing to set up.
+
+Bare-metal, add a cron job:
 
 ```cron
 * * * * * php /var/www/llm-quota-dashboard/bin/poll.php >> /tmp/quota-poll.log 2>&1

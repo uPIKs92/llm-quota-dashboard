@@ -1,0 +1,76 @@
+# LLM Quota Dashboard — one-command deployment.
+#
+#   docker compose up -d --build   # build the image locally from source
+#   docker compose up -d           # pull the published image instead
+#
+# App config comes from .env in this directory (same file bare-metal setups
+# use — see .env.example). Compose interpolates the values below from it.
+# If you fork and publish your own image, change the `image:` lines.
+
+name: llm-quota-dashboard
+
+services:
+  db:
+    # MariaDB, not MySQL: sql/schema.sql uses `ADD COLUMN IF NOT EXISTS`,
+    # which MySQL rejects. README documents MariaDB 10.3+ support.
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-quota_dash}
+      MYSQL_USER: ${DB_USERNAME:-quota_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-quota_pass}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change_me_root}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Idempotent schema; imported automatically on first volume init only.
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  web:
+    # Local builds tag this image name; prebuilt users pull it after pointing
+    # it at the right registry path (already the upstream project's).
+    build: .
+    image: ghcr.io/upiks92/llm-quota-dashboard:latest
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    env_file: .env
+    environment:
+      # The database is the `db` service — overrides .env's DB_HOST.
+      # Credentials are re-interpolated so db/web/poller always agree even
+      # when .env leaves them empty.
+      DB_HOST: db
+      DB_DATABASE: ${DB_DATABASE:-quota_dash}
+      DB_USERNAME: ${DB_USERNAME:-quota_user}
+      DB_PASSWORD: ${DB_PASSWORD:-quota_pass}
+      TZ: ${TZ:-UTC}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  poller:
+    # Replaces the bare-metal cron job. bin/poll.php exits 1 when upstream
+    # fails — the loop must tolerate nonzero exits and retry every minute.
+    build: .
+    image: ghcr.io/upiks92/llm-quota-dashboard:latest
+    restart: unless-stopped
+    command: sh -c "while true; do php /var/www/html/bin/poll.php || true; sleep 60; done"
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_DATABASE: ${DB_DATABASE:-quota_dash}
+      DB_USERNAME: ${DB_USERNAME:-quota_user}
+      DB_PASSWORD: ${DB_PASSWORD:-quota_pass}
+      TZ: ${TZ:-UTC}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
