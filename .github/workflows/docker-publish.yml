@@ -2,7 +2,7 @@ name: Docker publish
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     tags: ['v*']
 
 permissions:
@@ -40,14 +40,14 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
-            type=sha,prefix=edge-,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=edge-,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
             org.opencontainers.image.title=LLM Quota Dashboard
             org.opencontainers.image.description=Realtime quota/usage dashboard for any LLM API, with daily history and Telegram alerts.
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Build & push
