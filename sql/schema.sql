@@ -81,26 +81,27 @@ CREATE TABLE IF NOT EXISTS `token_minute_log` (
   PRIMARY KEY (`ts_minute`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ───────────────────────── RTK Gain (token savings, pulled from vm124) ─────────────────────────
--- Filled by bin/poll-rtk.php from `rtk gain --all --format json`. Bucket rows are
+-- ───────────────────────── RTK Gain (token savings, one set of rows per host) ─────────────────────────
+-- Filled by bin/poll-rtk.php from `rtk gain --all --format json` on each host
+-- listed in rtk-hosts.json. `host` is the host id from that file. Bucket rows are
 -- NEVER deleted: they are the durable record beyond rtk's own 90-day history.
 -- Each poll upserts (last-write-wins): rtk recomputes the current bucket live,
 -- past buckets are immutable. Idempotent; safe to re-run.
+-- Existing single-host databases: apply sql/migrate-rtk-multi-host.sql once instead.
 
--- Single-row all-time totals (id pinned to 1).
 CREATE TABLE IF NOT EXISTS `rtk_summary` (
-  `id`              tinyint(3) unsigned NOT NULL DEFAULT 1,
+  `host`            varchar(32)  NOT NULL,
   `total_commands`  bigint(20) unsigned NOT NULL DEFAULT 0,
   `total_input`     bigint(20) unsigned NOT NULL DEFAULT 0,
   `total_output`    bigint(20) unsigned NOT NULL DEFAULT 0,
   `total_saved`     bigint(20) unsigned NOT NULL DEFAULT 0,
   `avg_savings_pct` decimal(5,2)  NOT NULL DEFAULT 0,
   `fetched_at`      datetime      NOT NULL,
-  PRIMARY KEY (`id`),
-  CONSTRAINT `rtk_summary_id_chk` CHECK (`id` = 1)
+  PRIMARY KEY (`host`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `rtk_daily` (
+  `host`          varchar(32)   NOT NULL,
   `log_date`      date          NOT NULL,
   `commands`      int(10) unsigned NOT NULL DEFAULT 0,
   `input_tokens`  bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -108,10 +109,11 @@ CREATE TABLE IF NOT EXISTS `rtk_daily` (
   `saved_tokens`  bigint(20) unsigned NOT NULL DEFAULT 0,
   `savings_pct`   decimal(5,2)  NOT NULL DEFAULT 0,
   `updated_at`    datetime      NOT NULL,
-  PRIMARY KEY (`log_date`)
+  PRIMARY KEY (`host`, `log_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `rtk_weekly` (
+  `host`          varchar(32)   NOT NULL,
   `week_start`    date          NOT NULL,
   `week_end`      date          NULL,
   `commands`      int(10) unsigned NOT NULL DEFAULT 0,
@@ -120,10 +122,11 @@ CREATE TABLE IF NOT EXISTS `rtk_weekly` (
   `saved_tokens`  bigint(20) unsigned NOT NULL DEFAULT 0,
   `savings_pct`   decimal(5,2)  NOT NULL DEFAULT 0,
   `updated_at`    datetime      NOT NULL,
-  PRIMARY KEY (`week_start`)
+  PRIMARY KEY (`host`, `week_start`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `rtk_monthly` (
+  `host`          varchar(32)   NOT NULL,
   `log_month`     char(7)       NOT NULL,   -- 'YYYY-MM'
   `commands`      int(10) unsigned NOT NULL DEFAULT 0,
   `input_tokens`  bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -131,14 +134,13 @@ CREATE TABLE IF NOT EXISTS `rtk_monthly` (
   `saved_tokens`  bigint(20) unsigned NOT NULL DEFAULT 0,
   `savings_pct`   decimal(5,2)  NOT NULL DEFAULT 0,
   `updated_at`    datetime      NOT NULL,
-  PRIMARY KEY (`log_month`)
+  PRIMARY KEY (`host`, `log_month`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Latest raw rtk JSON payload (id pinned to 1), kept for debugging/reprocessing.
+-- Latest raw rtk JSON payload per host, kept for debugging/reprocessing.
 CREATE TABLE IF NOT EXISTS `rtk_raw` (
-  `id`          tinyint(3) unsigned NOT NULL DEFAULT 1,
+  `host`        varchar(32) NOT NULL,
   `payload`     mediumtext,
   `fetched_at`  datetime NOT NULL,
-  PRIMARY KEY (`id`),
-  CONSTRAINT `rtk_raw_id_chk` CHECK (`id` = 1)
+  PRIMARY KEY (`host`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

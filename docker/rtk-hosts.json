@@ -1,0 +1,11 @@
+[
+  {
+    "id": "vm124",
+    "label": "vm124 (arm-svr)",
+    "source": "ssh",
+    "ssh_host": "192.168.10.124",
+    "ssh_user": "armand",
+    "ssh_key": "/keys/rtk_key",
+    "command": "/home/armand/.local/bin/rtk gain --all --format json"
+  }
+]

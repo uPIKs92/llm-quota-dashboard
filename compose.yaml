@@ -41,6 +41,9 @@ services:
     ports:
       - "8080:80"
     env_file: .env
+    volumes:
+      # RTK host list (ids, sources, key paths) — read by server.php.
+      - ./docker/rtk-hosts.json:/var/www/html/rtk-hosts.json:ro
     environment:
       # The database is the `db` service — overrides .env's DB_HOST.
       # Credentials are re-interpolated so db/web/poller always agree even
@@ -60,9 +63,8 @@ services:
     build: .
     image: ghcr.io/upiks92/llm-quota-dashboard:latest
     restart: unless-stopped
-    # poll-rtk.php is optional: it fails harmlessly (`|| true`) until the
-    # RTK SSH key and known_hosts are mounted (see README "RTK Gain view").
-    command: sh -c "while true; do php /var/www/html/bin/poll.php || true; php /var/www/html/bin/poll-rtk.php || true; sleep 60; done"
+    # Quota poll only. RTK is polled by the host cron (see README "RTK Gain view").
+    command: sh -c "while true; do php /var/www/html/bin/poll.php || true; sleep 60; done"
     env_file: .env
     environment:
       DB_HOST: db
@@ -79,6 +81,7 @@ services:
       # Restricted SSH key (ideally forced-command on vm124) + pinned host key.
       - ./docker/rtk_key:/keys/rtk_key:ro
       - ./docker/known_hosts:/root/.ssh/known_hosts:ro
+      - ./docker/rtk-hosts.json:/var/www/html/rtk-hosts.json:ro
     depends_on:
       db:
         condition: service_healthy

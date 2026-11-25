@@ -34,6 +34,7 @@ interface RtkSummary {
   avgSavingsPct: number
 }
 interface RtkData {
+  host?: string
   empty?: boolean
   stale?: boolean
   fetchedAt?: string
@@ -41,6 +42,14 @@ interface RtkData {
   daily?: RtkDaily[]
   weekly?: RtkWeekly[]
   monthly?: RtkMonthly[]
+}
+interface RtkHost {
+  id: string
+  label: string
+  source: "local" | "ssh"
+  empty: boolean
+  stale: boolean
+  fetchedAt: string | null
 }
 
 type Status = "ok" | "error" | "loading"
@@ -111,12 +120,14 @@ export function RtkGainView({ refreshKey, onStatusChange }: RtkGainViewProps) {
   const [status, setStatus] = useState<Status>("loading")
   const [error, setError] = useState("")
   const [mode, setMode] = useState<Mode>("daily")
+  const [hosts, setHosts] = useState<RtkHost[]>([])
+  const [hostId, setHostId] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (host: string) => {
     setStatus("loading")
     setError("")
     try {
-      const res = await fetch("/api/rtk")
+      const res = await fetch(`/api/rtk?host=${encodeURIComponent(host)}`)
       // Read as text first: a proxy or PHP failure can return a non-JSON body.
       const text = await res.text()
       let json: unknown = null
@@ -139,15 +150,40 @@ export function RtkGainView({ refreshKey, onStatusChange }: RtkGainViewProps) {
     }
   }, [])
 
-  useEffect(() => {
-    load()
-    const id = setInterval(load, 60000)
-    return () => clearInterval(id)
-  }, [load])
+  // Host list: on mount, and again on Refresh (picks up new or stale hosts).
+  const loadHosts = useCallback(async () => {
+    try {
+      const res = await fetch("/api/rtk/hosts")
+      const json = await res.json()
+      if (!res.ok || !Array.isArray(json.hosts)) throw new Error(json.error || `HTTP ${res.status}`)
+      setHosts(json.hosts)
+      setHostId(prev => prev ?? json.hosts[0]?.id ?? null)
+    } catch (err) {
+      setStatus("error")
+      setError(err instanceof Error ? err.message : "Failed to load RTK hosts")
+    }
+  }, [])
 
   useEffect(() => {
-    if (refreshKey > 0) load()
-  }, [refreshKey, load])
+    loadHosts()
+  }, [loadHosts, refreshKey])
+
+  // Data for the selected host: on selection, every 60s, and on Refresh.
+  useEffect(() => {
+    if (hostId === null) return
+    load(hostId)
+    const id = setInterval(() => load(hostId), 60000)
+    return () => clearInterval(id)
+  }, [hostId, load, refreshKey])
+
+  /** Switch host; drop the previous host's numbers so they never show under the new name. */
+  const selectHost = useCallback((id: string) => {
+    if (id === hostId) return
+    setData(null)
+    setHostId(id)
+  }, [hostId])
+
+  const hostLabel = hosts.find(h => h.id === hostId)?.label ?? hostId ?? ""
 
   useEffect(() => {
     onStatusChange(status)
@@ -212,6 +248,34 @@ export function RtkGainView({ refreshKey, onStatusChange }: RtkGainViewProps) {
 
   return (
     <>
+      {hosts.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="RTK host">
+          {hosts.map(h => (
+            <button
+              key={h.id}
+              type="button"
+              onClick={() => selectHost(h.id)}
+              aria-pressed={hostId === h.id}
+              className={cn(
+                "spring eyebrow glass-pill inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 transition-colors",
+                hostId === h.id
+                  ? "text-card-foreground"
+                  : "text-card-foreground/45 hover:text-card-foreground/80",
+              )}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "size-1.5 rounded-full",
+                  h.empty ? "bg-card-foreground/30" : h.stale ? "bg-amber-400" : "bg-emerald-400",
+                )}
+              />
+              {h.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Hero: all-time savings */}
       <GlassCard revealDelay={0} innerClassName="p-4 sm:p-6">
         {summary ? (
@@ -223,7 +287,7 @@ export function RtkGainView({ refreshKey, onStatusChange }: RtkGainViewProps) {
               {stale && (
                 <span className="eyebrow glass-pill inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2.5 py-1 text-amber-600 dark:text-amber-400">
                   <Warning size={12} weight="thin" />
-                  Poller can't reach vm124 — showing last data {fetchedAt ? fmtTime(fetchedAt) : ""}
+                  Poller can't reach {hostLabel} — showing last data {fetchedAt ? fmtTime(fetchedAt) : ""}
                 </span>
               )}
             </div>
@@ -246,13 +310,13 @@ export function RtkGainView({ refreshKey, onStatusChange }: RtkGainViewProps) {
           </>
         ) : data?.empty ? (
           <div className="flex min-h-[120px] flex-col justify-center gap-2">
-            <p className="text-sm text-card-foreground/70">No data yet — poller hasn't fetched from vm124.</p>
+            <p className="text-sm text-card-foreground/70">No data yet for {hostLabel || "this host"} — the poller hasn't fetched it.</p>
           </div>
         ) : status === "error" ? (
           <div className="flex min-h-[120px] flex-col items-center justify-center gap-3">
             <p className="text-sm text-card-foreground/70">{error}</p>
             <button
-              onClick={load}
+              onClick={() => hostId !== null && load(hostId)}
               className="spring rounded-full px-4 py-1.5 text-sm font-medium text-foreground/70 hover:bg-foreground/10 hover:text-foreground active:scale-[0.96]"
             >
               Retry
@@ -339,7 +403,7 @@ export function RtkGainView({ refreshKey, onStatusChange }: RtkGainViewProps) {
 
       {data && !data.empty && (
         <p className="px-1 text-[10px] text-card-foreground/55">
-          Tokens estimated as bytes/4 · vm124 via DB
+          Tokens estimated as bytes/4 · {hostLabel || "rtk"} via DB
           {fetchedAt ? ` · fetched ${fmtTime(fetchedAt)}` : ""}
         </p>
       )}

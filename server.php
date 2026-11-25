@@ -30,9 +30,22 @@ if ($path === '/api/window-history') {
     exit(json_encode(windowHistory((int)($_GET['n'] ?? 34))));
 }
 
+if ($path === '/api/rtk/hosts') {
+    header('Content-Type: application/json');
+    exit(rtkJson(fn() => ['hosts' => rtkHostsStatus()]));
+}
+
 if ($path === '/api/rtk') {
     header('Content-Type: application/json');
-    exit(json_encode(rtkPayload()));
+    exit(rtkJson(function (): array {
+        $ids = array_column(rtkHosts(), 'id');
+        $host = (string)($_GET['host'] ?? ($ids[0] ?? ''));
+        if (!in_array($host, $ids, true)) {
+            http_response_code(404);
+            return ['error' => 'unknown host'];
+        }
+        return rtkPayload($host);
+    }));
 }
 
 if ($path === '/api/config') {
@@ -380,20 +393,118 @@ function windowHistory(int $n = 34): array
 }
 
 /**
- * RTK Gain view payload — read-only from the rtk_* tables that bin/poll-rtk.php
- * fills from vm124. `empty` when no poll has ever stored a summary. `stale` when
- * the last successful poll is older than RTK_STALE_MINUTES (default 10); the
- * last good data is still returned so the view can show it with a badge.
+ * Configured RTK hosts, from rtk-hosts.json (RTK_HOSTS_FILE, default
+ * <app>/rtk-hosts.json). Each entry: id (a-z0-9_-, unique), label, source
+ * ("local" = rtk on this machine, "ssh" = pull from ssh_host), ssh_host,
+ * ssh_user, ssh_key (path, `~` expanded), command. Without the file, one host
+ * ("default") is built from the legacy RTK_* env vars.
+ *
+ * @return list<array{id:string,label:string,source:string,ssh_host:string,ssh_user:string,ssh_key:string,command:string}>
+ * @throws RuntimeException when the config is malformed.
  */
-function rtkPayload(): array
+function rtkHosts(): array
+{
+    static $hosts = null;
+    if ($hosts !== null) {
+        return $hosts;
+    }
+    $e = env();
+    $file = $e['RTK_HOSTS_FILE'] ?? __DIR__ . '/rtk-hosts.json';
+    if (is_file($file)) {
+        $raw = json_decode((string)file_get_contents($file), true);
+        if (!is_array($raw) || !array_is_list($raw)) {
+            throw new RuntimeException("RTK hosts file is not a JSON list: {$file}");
+        }
+    } else {
+        $local = strtolower($e['RTK_SOURCE'] ?? 'ssh') === 'local';
+        $raw = [[
+            'id' => 'default',
+            'source' => $local ? 'local' : 'ssh',
+            'ssh_host' => $e['RTK_SSH_HOST'] ?? '192.168.10.124',
+            'ssh_user' => $e['RTK_SSH_USER'] ?? 'armand',
+            'ssh_key' => $e['RTK_SSH_KEY'] ?? '',
+            'command' => $local ? ($e['RTK_LOCAL_CMD'] ?? '') : ($e['RTK_REMOTE_CMD'] ?? ''),
+        ]];
+    }
+
+    $out = [];
+    $seen = [];
+    foreach ($raw as $i => $h) {
+        $id = is_array($h) ? (string)($h['id'] ?? '') : '';
+        $source = is_array($h) ? strtolower((string)($h['source'] ?? 'ssh')) : '';
+        if (!preg_match('/^[a-z0-9][a-z0-9_-]{0,31}$/', $id) || isset($seen[$id]) || !in_array($source, ['local', 'ssh'], true)) {
+            throw new RuntimeException("RTK host #{$i} invalid: id must match [a-z0-9_-] and be unique; source must be local or ssh");
+        }
+        $seen[$id] = true;
+        $defaultCmd = $source === 'local'
+            ? '~/.local/bin/rtk gain --all --format json'
+            : 'rtk gain --all --format json';
+        $out[] = [
+            'id' => $id,
+            'label' => (string)($h['label'] ?? $id),
+            'source' => $source,
+            'ssh_host' => (string)($h['ssh_host'] ?? ''),
+            'ssh_user' => (string)($h['ssh_user'] ?? ''),
+            'ssh_key' => (string)($h['ssh_key'] ?? ''),
+            'command' => trim((string)($h['command'] ?? '')) !== '' ? (string)$h['command'] : $defaultCmd,
+        ];
+    }
+    if ($out === []) {
+        throw new RuntimeException('RTK hosts file lists no hosts');
+    }
+    return $hosts = $out;
+}
+
+/** Runs a JSON-producing callback, turning exceptions into a 500 JSON error. */
+function rtkJson(callable $fn): string
+{
+    try {
+        return json_encode($fn());
+    } catch (Throwable $t) {
+        http_response_code(500);
+        return json_encode(['error' => $t->getMessage()]);
+    }
+}
+
+/**
+ * Per-host freshness for the host picker: fetchedAt, stale, empty.
+ * Stale = last successful poll older than RTK_STALE_MINUTES (default 10).
+ */
+function rtkHostsStatus(): array
+{
+    $fetched = [];
+    foreach (db()->query('SELECT host, fetched_at FROM rtk_summary')->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $fetched[$r['host']] = strtotime($r['fetched_at']) ?: 0;
+    }
+    $staleMinutes = max(1, (int)(env()['RTK_STALE_MINUTES'] ?? 10));
+    return array_map(function (array $h) use ($fetched, $staleMinutes): array {
+        $ts = $fetched[$h['id']] ?? null;
+        return [
+            'id' => $h['id'],
+            'label' => $h['label'],
+            'source' => $h['source'],
+            'empty' => $ts === null,
+            'stale' => $ts === null ? true : (time() - $ts) > $staleMinutes * 60,
+            'fetchedAt' => $ts === null ? null : date('c', $ts),
+        ];
+    }, rtkHosts());
+}
+
+/**
+ * RTK Gain payload for one host, read-only from the rtk_* tables that
+ * bin/poll-rtk.php fills. `empty` when that host has never been stored.
+ */
+function rtkPayload(string $host): array
 {
     $pdo = db();
-    $s = $pdo->query(
+    $s = $pdo->prepare(
         'SELECT total_commands, total_input, total_output, total_saved, avg_savings_pct, fetched_at
-         FROM rtk_summary WHERE id = 1'
-    )->fetch(PDO::FETCH_ASSOC);
+         FROM rtk_summary WHERE host = ?'
+    );
+    $s->execute([$host]);
+    $s = $s->fetch(PDO::FETCH_ASSOC);
     if (!$s) {
-        return ['empty' => true];
+        return ['empty' => true, 'host' => $host];
     }
 
     $fetchedTs = strtotime($s['fetched_at']) ?: 0;
@@ -407,20 +518,26 @@ function rtkPayload(): array
         'savingsPct'   => (float)$r['savings_pct'],
     ];
 
-    $daily = $pdo->query(
+    $bucket = function (string $sql) use ($pdo, $host): array {
+        $st = $pdo->prepare($sql);
+        $st->execute([$host]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    };
+    $daily = $bucket(
         'SELECT log_date, commands, input_tokens, output_tokens, saved_tokens, savings_pct
-         FROM rtk_daily ORDER BY log_date ASC'
-    )->fetchAll(PDO::FETCH_ASSOC);
-    $weekly = $pdo->query(
+         FROM rtk_daily WHERE host = ? ORDER BY log_date ASC'
+    );
+    $weekly = $bucket(
         'SELECT week_start, week_end, commands, input_tokens, output_tokens, saved_tokens, savings_pct
-         FROM rtk_weekly ORDER BY week_start ASC'
-    )->fetchAll(PDO::FETCH_ASSOC);
-    $monthly = $pdo->query(
+         FROM rtk_weekly WHERE host = ? ORDER BY week_start ASC'
+    );
+    $monthly = $bucket(
         'SELECT log_month, commands, input_tokens, output_tokens, saved_tokens, savings_pct
-         FROM rtk_monthly ORDER BY log_month ASC'
-    )->fetchAll(PDO::FETCH_ASSOC);
+         FROM rtk_monthly WHERE host = ? ORDER BY log_month ASC'
+    );
 
     return [
+        'host' => $host,
         'summary' => [
             'totalCommands'  => (int)$s['total_commands'],
             'totalInput'     => (int)$s['total_input'],

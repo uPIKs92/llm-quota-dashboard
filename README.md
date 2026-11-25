@@ -264,32 +264,52 @@ tables → `/api/rtk` → RTK view.
 longer. Each poll upserts the buckets (the current bucket updates live; past
 buckets don't change).
 
+### Hosts
+
+Each rtk host is listed in `rtk-hosts.json` (copy `rtk-hosts.example.json`; the
+live file is gitignored because it holds host-specific key paths). Each entry:
+
+| Field | Meaning |
+|---|---|
+| `id` | Unique, `[a-z0-9_-]`. Stored in the DB and used in `/api/rtk?host=` |
+| `label` | Name shown in the view |
+| `source` | `local` = rtk on the machine running the poller; `ssh` = pull over SSH |
+| `ssh_host`, `ssh_user`, `ssh_key` | SSH targets (`ssh` only). `~` is expanded in `ssh_key` |
+| `command` | Remote or local rtk command (defaults to `rtk gain --all --format json`) |
+
+The path is `RTK_HOSTS_FILE` (default `rtk-hosts.json` next to `server.php`).
+Without the file, one host (`default`) is built from the legacy `RTK_*` variables.
+
+Each host is polled and stored independently: one unreachable host leaves its
+own rows untouched and doesn't block the others. The poller exits 1 if any host
+fails.
+
 ### Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RTK_SSH_HOST` | `192.168.10.124` | Host running rtk |
-| `RTK_SSH_USER` | `armand` | SSH user on that host |
-| `RTK_SSH_KEY` | *(empty)* | Private key path (`~` expanded). Empty = default ssh identity |
-| `RTK_REMOTE_CMD` | `/home/armand/.local/bin/rtk gain --all --format json` | Absolute path, since non-interactive ssh skips `.bashrc` |
-| `RTK_STALE_MINUTES` | `10` | Minutes without a successful poll before the view shows a stale badge |
+| `RTK_HOSTS_FILE` | `rtk-hosts.json` | Path to the host list |
+| `RTK_STALE_MINUTES` | `10` | Minutes without a successful poll before a host shows a stale badge |
+| `RTK_SOURCE`, `RTK_SSH_*`, `RTK_REMOTE_CMD`, `RTK_LOCAL_CMD` | — | Legacy single-host settings, used only when there is no hosts file |
 
-The fetcher uses key-based SSH only (`BatchMode=yes`, `ConnectTimeout=5`) and
-has a 20 s wall timeout. It never prompts. It needs rtk 1.2.1 or newer on the
-remote host, which supports `--all --format json`.
+Use key-based SSH only (`BatchMode=yes`, `ConnectTimeout=5`). Each poll has a
+20 s wall timeout and never prompts. The remote host needs rtk 1.2.1 or newer
+(`--all --format json`).
 
 ### Database
 
-Apply the schema once. `sql/schema.sql` is idempotent, so re-running it on a
-live database is safe. Docker only auto-imports it on the first volume init, so
-existing volumes need the manual import:
+Fresh installs: `mysql -u quota_user -p quota_dash < sql/schema.sql` creates the
+per-host tables. Existing single-host databases (created before multi-host
+support) need the one-time migration instead. It adds a `host` column, backfills
+the existing rows with the host id you set, and rebuilds the primary keys:
 
 ```sh
-mysql -u quota_user -p quota_dash < sql/schema.sql
+mysql -u quota_user -p quota_dash -e "SET @legacy_host = 'local'; SOURCE sql/migrate-rtk-multi-host.sql;"
 ```
 
-The new tables are `rtk_summary` (one row), `rtk_daily`, `rtk_weekly`,
-`rtk_monthly` and `rtk_raw` (the latest raw JSON, for debugging).
+Run the migration once only. Back up the `rtk_*` tables first. The tables are
+`rtk_summary`, `rtk_daily`, `rtk_weekly`, `rtk_monthly` and `rtk_raw`, all keyed
+by host.
 
 ### Bare-metal cron
 
@@ -310,8 +330,14 @@ Then set `RTK_SSH_KEY=~/.ssh/rtk_poll_key` in `.env`.
 
 ### Docker
 
-The `poller` service runs `poll-rtk.php` after the quota poll. It mounts two
-files from `./docker/`, which are gitignored:
+The Docker stack reads `docker/rtk-hosts.json` (mounted as `rtk-hosts.json`), which
+lists vm124 with the in-container key path. The `poller` loop runs only the quota
+poll by default, so RTK data here stays stale until you add
+`php /var/www/html/bin/poll-rtk.php` to the loop in `compose.yaml`. The host
+cron is the normal RTK poller. It can fetch every configured host, so the Docker
+stack doesn't need to make the same SSH connections.
+
+Key setup (files in `./docker/` are gitignored):
 
 ```sh
 ssh-keygen -t ed25519 -f docker/rtk_key -N '' -C rtk-gain-poll
@@ -320,9 +346,7 @@ ssh-keyscan -H 192.168.10.124 > docker/known_hosts
 # append docker/rtk_key.pub to the remote authorized_keys with the forced command above
 ```
 
-`openssh-client` is installed in the image. Until the key is in place,
-`poll-rtk.php` fails harmlessly on each loop (`|| true`), and the quota
-poller keeps running.
+`openssh-client` is installed in the image.
 
 ### API
 
@@ -378,7 +402,8 @@ npm run dev             # frontend at :5173
 | `/api/stats` | GET | Normalized quota (proxied + mapped from upstream) |
 | `/api/history` | GET | Daily token log (last 30 days) |
 | `/api/window-history` | GET | Token usage per 5h quota window (`?n=`, 1–200, default 34) |
-| `/api/rtk` | GET | RTK savings: summary + daily/weekly/monthly buckets (from the DB) |
+| `/api/rtk?host=<id>` | GET | RTK savings for one host: summary + daily/weekly/monthly buckets (from the DB) |
+| `/api/rtk/hosts` | GET | Configured RTK hosts with freshness (`empty`, `stale`, `fetchedAt`) |
 | `/api/config` | GET | `{ "appName": "..." }` |
 | `/api/tg/webhook` | POST | Telegram webhook receiver |
 

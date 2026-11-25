@@ -1,35 +1,31 @@
 #!/usr/bin/env php
 <?php
 /**
- * Cron entry point: pull `rtk gain --all --format json` from vm124 over SSH and
- * upsert it into the rtk_* tables. The dashboard reads only from the DB.
+ * Cron entry point: fetch `rtk gain --all --format json` from every host in
+ * rtk-hosts.json and upsert each into the rtk_* tables (keyed by host id). The
+ * dashboard reads only from the DB.
+ *
+ *   php bin/poll-rtk.php            # all hosts
+ *   php bin/poll-rtk.php vm124      # one host id
  *
  * Add to crontab (every minute, separate line from the quota poller):
  *   * * * * * php /var/www/html/glm-quota-dashboard/bin/poll-rtk.php >> /tmp/rtk-poll.log 2>&1
  *
- * Config (.env or process env): RTK_SSH_HOST, RTK_SSH_USER, RTK_SSH_KEY (optional
- * private-key path, `~` expanded), RTK_REMOTE_CMD. See README "RTK Gain view".
- *
- * On any failure the DB is left untouched; staleness shows via fetched_at age.
+ * Each host is fetched and stored independently: one unreachable host does not
+ * block the others, and its DB rows stay untouched. Exit 0 only if every polled
+ * host succeeded. See README "RTK Gain view" for rtk-hosts.json.
  */
 
 require __DIR__ . '/../server.php';
 
 const RTK_TIMEOUT_SECONDS = 20;
-const RTK_DEFAULT_CMD = '/home/armand/.local/bin/rtk gain --all --format json';
 
 function rtkLog(string $msg): void
 {
     fwrite(STDERR, '[' . date('c') . "] rtk poll: {$msg}\n");
 }
 
-function rtkFail(string $msg): never
-{
-    rtkLog("failed: {$msg}");
-    exit(1);
-}
-
-/** Expand a leading "~/" (.env values are not shell-expanded). */
+/** Expand a leading "~/" in a path (config values are not shell-expanded). */
 function rtkExpandPath(string $path): string
 {
     if ($path !== '' && $path[0] === '~') {
@@ -48,7 +44,7 @@ function rtkRun(array $argv, int $timeout): array
     $desc = [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
     $proc = proc_open($argv, $desc, $pipes);
     if (!is_resource($proc)) {
-        return [-1, '', 'could not start ssh'];
+        return [-1, '', 'could not start command'];
     }
 
     $open = [1 => $pipes[1], 2 => $pipes[2]];
@@ -107,148 +103,201 @@ function rtkDateOrNull(mixed $v): ?string
     return is_string($v) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $v) ? $v : null;
 }
 
-/* --------------------------------- fetch ---------------------------------- */
-
-$e = env();
-$host = $e['RTK_SSH_HOST'] ?? '192.168.10.124';
-$user = $e['RTK_SSH_USER'] ?? 'armand';
-$key = rtkExpandPath($e['RTK_SSH_KEY'] ?? '');
-$remoteCmd = ($e['RTK_REMOTE_CMD'] ?? '') !== '' ? $e['RTK_REMOTE_CMD'] : RTK_DEFAULT_CMD;
-
-$argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5'];
-if ($key !== '') {
-    array_push($argv, '-i', $key);
-}
-array_push($argv, "{$user}@{$host}", $remoteCmd);
-
-[$code, $stdout, $stderr] = rtkRun($argv, RTK_TIMEOUT_SECONDS);
-if ($code !== 0) {
-    rtkFail('ssh/rtk exit ' . $code . ($stderr !== '' ? ': ' . trim($stderr) : ''));
-}
-if (trim($stdout) === '') {
-    rtkFail('empty output from rtk');
-}
-
-/* ------------------------------- validate --------------------------------- */
-
-$data = json_decode($stdout, true);
-if (!is_array($data) || !is_array($data['summary'] ?? null) || !is_array($data['daily'] ?? null)) {
-    rtkFail('output is not the expected rtk gain JSON (missing summary/daily)');
-}
-
-$summary = $data['summary'];
-$skipped = 0;
-
-$daily = [];
-foreach ($data['daily'] as $row) {
-    $date = is_array($row) ? rtkDateOrNull($row['date'] ?? null) : null;
-    if ($date === null) {
-        $skipped++;
-        continue;
+/** Fetch rtk's JSON for one host. Throws RuntimeException on any failure. */
+function rtkFetch(array $h): string
+{
+    if ($h['source'] === 'local') {
+        // Split on whitespace (no shell): first token is the binary.
+        $argv = preg_split('/\s+/', trim($h['command'])) ?: [];
+        if ($argv === []) {
+            throw new RuntimeException('command is empty');
+        }
+        $argv[0] = rtkExpandPath($argv[0]);
+    } else {
+        if ($h['ssh_host'] === '') {
+            throw new RuntimeException('ssh_host is not set');
+        }
+        $key = rtkExpandPath($h['ssh_key']);
+        $argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5'];
+        if ($key !== '') {
+            array_push($argv, '-i', $key);
+        }
+        $target = $h['ssh_user'] !== '' ? "{$h['ssh_user']}@{$h['ssh_host']}" : $h['ssh_host'];
+        array_push($argv, $target, $h['command']);
     }
-    $daily[] = [$date, rtkInt($row['commands'] ?? 0), rtkInt($row['input_tokens'] ?? 0),
-        rtkInt($row['output_tokens'] ?? 0), rtkInt($row['saved_tokens'] ?? 0), rtkPct($row['savings_pct'] ?? 0)];
-}
 
-$weekly = [];
-foreach (is_array($data['weekly'] ?? null) ? $data['weekly'] : [] as $row) {
-    $start = is_array($row) ? rtkDateOrNull($row['week_start'] ?? null) : null;
-    if ($start === null) {
-        $skipped++;
-        continue;
+    [$code, $stdout, $stderr] = rtkRun($argv, RTK_TIMEOUT_SECONDS);
+    if ($code !== 0) {
+        throw new RuntimeException('exit ' . $code . ($stderr !== '' ? ': ' . trim($stderr) : ''));
     }
-    $weekly[] = [$start, rtkDateOrNull($row['week_end'] ?? null), rtkInt($row['commands'] ?? 0),
-        rtkInt($row['input_tokens'] ?? 0), rtkInt($row['output_tokens'] ?? 0),
-        rtkInt($row['saved_tokens'] ?? 0), rtkPct($row['savings_pct'] ?? 0)];
-}
-
-$monthly = [];
-foreach (is_array($data['monthly'] ?? null) ? $data['monthly'] : [] as $row) {
-    $month = is_array($row) && is_string($row['month'] ?? null) && preg_match('/^\d{4}-\d{2}$/', $row['month'])
-        ? $row['month'] : null;
-    if ($month === null) {
-        $skipped++;
-        continue;
+    if (trim($stdout) === '') {
+        throw new RuntimeException('empty output from rtk');
     }
-    $monthly[] = [$month, rtkInt($row['commands'] ?? 0), rtkInt($row['input_tokens'] ?? 0),
-        rtkInt($row['output_tokens'] ?? 0), rtkInt($row['saved_tokens'] ?? 0), rtkPct($row['savings_pct'] ?? 0)];
+    return $stdout;
 }
 
-if ($skipped > 0) {
-    rtkLog("skipped {$skipped} malformed bucket(s)");
+/**
+ * Validate rtk's JSON and upsert it under $host. Last-write-wins per bucket.
+ * Throws on validation or DB failure, leaving the host's rows untouched.
+ * @return array{daily:int,weekly:int,monthly:int}
+ */
+function rtkStore(string $host, string $stdout): array
+{
+    $data = json_decode($stdout, true);
+    if (!is_array($data) || !is_array($data['summary'] ?? null) || !is_array($data['daily'] ?? null)) {
+        throw new RuntimeException('output is not the expected rtk gain JSON (missing summary/daily)');
+    }
+    $summary = $data['summary'];
+    $skipped = 0;
+
+    $daily = [];
+    foreach ($data['daily'] as $row) {
+        $date = is_array($row) ? rtkDateOrNull($row['date'] ?? null) : null;
+        if ($date === null) {
+            $skipped++;
+            continue;
+        }
+        $daily[] = [$date, rtkInt($row['commands'] ?? 0), rtkInt($row['input_tokens'] ?? 0),
+            rtkInt($row['output_tokens'] ?? 0), rtkInt($row['saved_tokens'] ?? 0), rtkPct($row['savings_pct'] ?? 0)];
+    }
+
+    $weekly = [];
+    foreach (is_array($data['weekly'] ?? null) ? $data['weekly'] : [] as $row) {
+        $start = is_array($row) ? rtkDateOrNull($row['week_start'] ?? null) : null;
+        if ($start === null) {
+            $skipped++;
+            continue;
+        }
+        $weekly[] = [$start, rtkDateOrNull($row['week_end'] ?? null), rtkInt($row['commands'] ?? 0),
+            rtkInt($row['input_tokens'] ?? 0), rtkInt($row['output_tokens'] ?? 0),
+            rtkInt($row['saved_tokens'] ?? 0), rtkPct($row['savings_pct'] ?? 0)];
+    }
+
+    $monthly = [];
+    foreach (is_array($data['monthly'] ?? null) ? $data['monthly'] : [] as $row) {
+        $month = is_array($row) && is_string($row['month'] ?? null) && preg_match('/^\d{4}-\d{2}$/', $row['month'])
+            ? $row['month'] : null;
+        if ($month === null) {
+            $skipped++;
+            continue;
+        }
+        $monthly[] = [$month, rtkInt($row['commands'] ?? 0), rtkInt($row['input_tokens'] ?? 0),
+            rtkInt($row['output_tokens'] ?? 0), rtkInt($row['saved_tokens'] ?? 0), rtkPct($row['savings_pct'] ?? 0)];
+    }
+
+    if ($skipped > 0) {
+        rtkLog("[{$host}] skipped {$skipped} malformed bucket(s)");
+    }
+
+    $now = date('Y-m-d H:i:s');
+    $pdo = db();
+    try {
+        $pdo->beginTransaction();
+
+        $pdo->prepare(
+            'INSERT INTO rtk_summary (host, total_commands, total_input, total_output, total_saved, avg_savings_pct, fetched_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               total_commands = VALUES(total_commands), total_input = VALUES(total_input),
+               total_output = VALUES(total_output), total_saved = VALUES(total_saved),
+               avg_savings_pct = VALUES(avg_savings_pct), fetched_at = VALUES(fetched_at)'
+        )->execute([
+            $host,
+            rtkInt($summary['total_commands'] ?? 0), rtkInt($summary['total_input'] ?? 0),
+            rtkInt($summary['total_output'] ?? 0), rtkInt($summary['total_saved'] ?? 0),
+            rtkPct($summary['avg_savings_pct'] ?? 0), $now,
+        ]);
+
+        $stmt = $pdo->prepare(
+            'INSERT INTO rtk_daily (host, log_date, commands, input_tokens, output_tokens, saved_tokens, savings_pct, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               commands = VALUES(commands), input_tokens = VALUES(input_tokens),
+               output_tokens = VALUES(output_tokens), saved_tokens = VALUES(saved_tokens),
+               savings_pct = VALUES(savings_pct), updated_at = VALUES(updated_at)'
+        );
+        foreach ($daily as $r) {
+            $stmt->execute([$host, ...$r, $now]);
+        }
+
+        $stmt = $pdo->prepare(
+            'INSERT INTO rtk_weekly (host, week_start, week_end, commands, input_tokens, output_tokens, saved_tokens, savings_pct, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               week_end = VALUES(week_end), commands = VALUES(commands), input_tokens = VALUES(input_tokens),
+               output_tokens = VALUES(output_tokens), saved_tokens = VALUES(saved_tokens),
+               savings_pct = VALUES(savings_pct), updated_at = VALUES(updated_at)'
+        );
+        foreach ($weekly as $r) {
+            $stmt->execute([$host, ...$r, $now]);
+        }
+
+        $stmt = $pdo->prepare(
+            'INSERT INTO rtk_monthly (host, log_month, commands, input_tokens, output_tokens, saved_tokens, savings_pct, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               commands = VALUES(commands), input_tokens = VALUES(input_tokens),
+               output_tokens = VALUES(output_tokens), saved_tokens = VALUES(saved_tokens),
+               savings_pct = VALUES(savings_pct), updated_at = VALUES(updated_at)'
+        );
+        foreach ($monthly as $r) {
+            $stmt->execute([$host, ...$r, $now]);
+        }
+
+        // Upsert, not REPLACE: the app DB user has INSERT/UPDATE but no DELETE.
+        $pdo->prepare(
+            'INSERT INTO rtk_raw (host, payload, fetched_at) VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE payload = VALUES(payload), fetched_at = VALUES(fetched_at)'
+        )->execute([$host, $stdout, $now]);
+
+        $pdo->commit();
+    } catch (Throwable $t) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw new RuntimeException('db write failed: ' . $t->getMessage(), 0, $t);
+    }
+
+    return ['daily' => count($daily), 'weekly' => count($weekly), 'monthly' => count($monthly)];
 }
 
-/* -------------------------------- upsert ---------------------------------- */
+/** Fetch + store one host. Logs and returns false on failure; never throws. */
+function rtkPollHost(array $h): bool
+{
+    try {
+        $counts = rtkStore($h['id'], rtkFetch($h));
+    } catch (Throwable $t) {
+        rtkLog("[{$h['id']}] failed: " . $t->getMessage());
+        return false;
+    }
+    fwrite(STDOUT, '[' . date('c') . "] rtk poll ok [{$h['id']}]: {$counts['daily']} daily, "
+        . "{$counts['weekly']} weekly, {$counts['monthly']} monthly\n");
+    return true;
+}
 
-$now = date('Y-m-d H:i:s');
-$pdo = db();
+/* ---------------------------------- main ---------------------------------- */
 
 try {
-    $pdo->beginTransaction();
-
-    $pdo->prepare(
-        'INSERT INTO rtk_summary (id, total_commands, total_input, total_output, total_saved, avg_savings_pct, fetched_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           total_commands = VALUES(total_commands), total_input = VALUES(total_input),
-           total_output = VALUES(total_output), total_saved = VALUES(total_saved),
-           avg_savings_pct = VALUES(avg_savings_pct), fetched_at = VALUES(fetched_at)'
-    )->execute([
-        rtkInt($summary['total_commands'] ?? 0), rtkInt($summary['total_input'] ?? 0),
-        rtkInt($summary['total_output'] ?? 0), rtkInt($summary['total_saved'] ?? 0),
-        rtkPct($summary['avg_savings_pct'] ?? 0), $now,
-    ]);
-
-    $stmt = $pdo->prepare(
-        'INSERT INTO rtk_daily (log_date, commands, input_tokens, output_tokens, saved_tokens, savings_pct, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           commands = VALUES(commands), input_tokens = VALUES(input_tokens),
-           output_tokens = VALUES(output_tokens), saved_tokens = VALUES(saved_tokens),
-           savings_pct = VALUES(savings_pct), updated_at = VALUES(updated_at)'
-    );
-    foreach ($daily as $r) {
-        $stmt->execute([...$r, $now]);
-    }
-
-    $stmt = $pdo->prepare(
-        'INSERT INTO rtk_weekly (week_start, week_end, commands, input_tokens, output_tokens, saved_tokens, savings_pct, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           week_end = VALUES(week_end), commands = VALUES(commands), input_tokens = VALUES(input_tokens),
-           output_tokens = VALUES(output_tokens), saved_tokens = VALUES(saved_tokens),
-           savings_pct = VALUES(savings_pct), updated_at = VALUES(updated_at)'
-    );
-    foreach ($weekly as $r) {
-        $stmt->execute([...$r, $now]);
-    }
-
-    $stmt = $pdo->prepare(
-        'INSERT INTO rtk_monthly (log_month, commands, input_tokens, output_tokens, saved_tokens, savings_pct, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           commands = VALUES(commands), input_tokens = VALUES(input_tokens),
-           output_tokens = VALUES(output_tokens), saved_tokens = VALUES(saved_tokens),
-           savings_pct = VALUES(savings_pct), updated_at = VALUES(updated_at)'
-    );
-    foreach ($monthly as $r) {
-        $stmt->execute([...$r, $now]);
-    }
-
-    // Upsert, not REPLACE: the app DB user has INSERT/UPDATE but no DELETE.
-    $pdo->prepare(
-        'INSERT INTO rtk_raw (id, payload, fetched_at) VALUES (1, ?, ?)
-         ON DUPLICATE KEY UPDATE payload = VALUES(payload), fetched_at = VALUES(fetched_at)'
-    )->execute([$stdout, $now]);
-
-    $pdo->commit();
-} catch (Throwable $t) {
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
-    rtkFail('db write failed: ' . $t->getMessage());
+    $hosts = rtkHosts();
+} catch (RuntimeException $t) {
+    rtkLog('config: ' . $t->getMessage());
+    exit(1);
 }
 
-fwrite(STDOUT, '[' . date('c') . '] rtk poll ok: ' . count($daily) . ' daily, '
-    . count($weekly) . ' weekly, ' . count($monthly) . " monthly\n");
-exit(0);
+$only = $_SERVER['argv'][1] ?? null;
+$ran = 0;
+$failed = 0;
+foreach ($hosts as $h) {
+    if ($only !== null && $h['id'] !== $only) {
+        continue;
+    }
+    $ran++;
+    if (!rtkPollHost($h)) {
+        $failed++;
+    }
+}
+if ($ran === 0) {
+    rtkLog("no configured host matches '{$only}'");
+    exit(1);
+}
+exit($failed > 0 ? 1 : 0);

@@ -29,3 +29,4 @@ dist-ssr
 docker/rtk_key
 docker/known_hosts
 docker/rtk_key.pub
+/rtk-hosts.json
