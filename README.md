@@ -248,6 +248,88 @@ Bare-metal, add a cron job:
 * * * * * php /var/www/llm-quota-dashboard/bin/poll.php >> /tmp/quota-poll.log 2>&1
 ```
 
+## RTK Gain view
+
+The app has a second view, **RTK** (`#rtk` or the *Quota | RTK* toggle), showing
+token savings from [rtk](https://github.com/rtk-ai/rtk) on a remote host. The
+every-minute poller SSHes to that host, runs `rtk gain --all --format json`,
+and stores the result in MySQL. The dashboard reads only from the database,
+the same way the quota history works.
+
+Data flow: `rtk` (remote) → SSH pull (`bin/poll-rtk.php`) → MySQL `rtk_*`
+tables → `/api/rtk` → RTK view.
+
+**Why the database:** rtk keeps only 90 days of history, but the `rtk_daily`,
+`rtk_weekly` and `rtk_monthly` rows are never deleted, so the history lasts
+longer. Each poll upserts the buckets (the current bucket updates live; past
+buckets don't change).
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RTK_SSH_HOST` | `192.168.10.124` | Host running rtk |
+| `RTK_SSH_USER` | `armand` | SSH user on that host |
+| `RTK_SSH_KEY` | *(empty)* | Private key path (`~` expanded). Empty = default ssh identity |
+| `RTK_REMOTE_CMD` | `/home/armand/.local/bin/rtk gain --all --format json` | Absolute path, since non-interactive ssh skips `.bashrc` |
+| `RTK_STALE_MINUTES` | `10` | Minutes without a successful poll before the view shows a stale badge |
+
+The fetcher uses key-based SSH only (`BatchMode=yes`, `ConnectTimeout=5`) and
+has a 20 s wall timeout. It never prompts. It needs rtk 1.2.1 or newer on the
+remote host, which supports `--all --format json`.
+
+### Database
+
+Apply the schema once. `sql/schema.sql` is idempotent, so re-running it on a
+live database is safe. Docker only auto-imports it on the first volume init, so
+existing volumes need the manual import:
+
+```sh
+mysql -u quota_user -p quota_dash < sql/schema.sql
+```
+
+The new tables are `rtk_summary` (one row), `rtk_daily`, `rtk_weekly`,
+`rtk_monthly` and `rtk_raw` (the latest raw JSON, for debugging).
+
+### Bare-metal cron
+
+Add a separate line so an rtk failure never blocks the quota poller:
+
+```cron
+* * * * * php /var/www/llm-quota-dashboard/bin/poll-rtk.php >> /tmp/rtk-poll.log 2>&1
+```
+
+Recommended: use a dedicated key that can only run rtk. In `authorized_keys`
+on the remote host, prefix it with a forced command:
+
+```
+command="/home/armand/.local/bin/rtk gain --all --format json",restrict ssh-ed25519 AAAA… rtk-gain-poll
+```
+
+Then set `RTK_SSH_KEY=~/.ssh/rtk_poll_key` in `.env`.
+
+### Docker
+
+The `poller` service runs `poll-rtk.php` after the quota poll. It mounts two
+files from `./docker/`, which are gitignored:
+
+```sh
+ssh-keygen -t ed25519 -f docker/rtk_key -N '' -C rtk-gain-poll
+chmod 600 docker/rtk_key                     # ssh refuses group/world-readable keys
+ssh-keyscan -H 192.168.10.124 > docker/known_hosts
+# append docker/rtk_key.pub to the remote authorized_keys with the forced command above
+```
+
+`openssh-client` is installed in the image. Until the key is in place,
+`poll-rtk.php` fails harmlessly on each loop (`|| true`), and the quota
+poller keeps running.
+
+### API
+
+`GET /api/rtk` returns `{ "empty": true }` until the first successful poll.
+After that it returns `summary`, `daily`, `weekly` and `monthly` (camelCase),
+plus `fetchedAt` and `stale`. Tokens are bytes/4 estimates.
+
 ## Telegram bot
 
 1. Create a bot via [@BotFather](https://t.me/BotFather), get the token.
@@ -269,6 +351,7 @@ Bare-metal, add a cron job:
 | Script | Purpose |
 |---|---|
 | `bin/poll.php` | Cron entry — poll, log, alert |
+| `bin/poll-rtk.php` | Cron entry — pull `rtk gain` from the remote host into the DB |
 | `bin/repair-daily.php` | One-time fix for cumulative-vs-daily token deltas |
 | `bin/set-webhook.php` | Register the Telegram webhook |
 
@@ -295,6 +378,7 @@ npm run dev             # frontend at :5173
 | `/api/stats` | GET | Normalized quota (proxied + mapped from upstream) |
 | `/api/history` | GET | Daily token log (last 30 days) |
 | `/api/window-history` | GET | Token usage per 5h quota window (`?n=`, 1–200, default 34) |
+| `/api/rtk` | GET | RTK savings: summary + daily/weekly/monthly buckets (from the DB) |
 | `/api/config` | GET | `{ "appName": "..." }` |
 | `/api/tg/webhook` | POST | Telegram webhook receiver |
 

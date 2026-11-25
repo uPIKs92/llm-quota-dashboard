@@ -60,7 +60,9 @@ services:
     build: .
     image: ghcr.io/upiks92/llm-quota-dashboard:latest
     restart: unless-stopped
-    command: sh -c "while true; do php /var/www/html/bin/poll.php || true; sleep 60; done"
+    # poll-rtk.php is optional: it fails harmlessly (`|| true`) until the
+    # RTK SSH key and known_hosts are mounted (see README "RTK Gain view").
+    command: sh -c "while true; do php /var/www/html/bin/poll.php || true; php /var/www/html/bin/poll-rtk.php || true; sleep 60; done"
     env_file: .env
     environment:
       DB_HOST: db
@@ -68,6 +70,15 @@ services:
       DB_USERNAME: ${DB_USERNAME:-quota_user}
       DB_PASSWORD: ${DB_PASSWORD:-quota_pass}
       TZ: ${TZ:-UTC}
+      RTK_SSH_HOST: ${RTK_SSH_HOST:-192.168.10.124}
+      RTK_SSH_USER: ${RTK_SSH_USER:-armand}
+      # Fixed container path (the mount below) — never a host path from .env.
+      RTK_SSH_KEY: /keys/rtk_key
+      RTK_REMOTE_CMD: ${RTK_REMOTE_CMD:-/home/armand/.local/bin/rtk gain --all --format json}
+    volumes:
+      # Restricted SSH key (ideally forced-command on vm124) + pinned host key.
+      - ./docker/rtk_key:/keys/rtk_key:ro
+      - ./docker/known_hosts:/root/.ssh/known_hosts:ro
     depends_on:
       db:
         condition: service_healthy

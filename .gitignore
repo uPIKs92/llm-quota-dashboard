@@ -25,3 +25,7 @@ dist-ssr
 .env
 .env.*
 .kilo
+# RTK poller SSH material (Docker path; see README)
+docker/rtk_key
+docker/known_hosts
+docker/rtk_key.pub

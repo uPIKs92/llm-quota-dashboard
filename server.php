@@ -30,6 +30,11 @@ if ($path === '/api/window-history') {
     exit(json_encode(windowHistory((int)($_GET['n'] ?? 34))));
 }
 
+if ($path === '/api/rtk') {
+    header('Content-Type: application/json');
+    exit(json_encode(rtkPayload()));
+}
+
 if ($path === '/api/config') {
     header('Content-Type: application/json');
     exit(json_encode(['appName' => appName()]));
@@ -372,6 +377,66 @@ function windowHistory(int $n = 34): array
         ],
         $rows
     );
+}
+
+/**
+ * RTK Gain view payload — read-only from the rtk_* tables that bin/poll-rtk.php
+ * fills from vm124. `empty` when no poll has ever stored a summary. `stale` when
+ * the last successful poll is older than RTK_STALE_MINUTES (default 10); the
+ * last good data is still returned so the view can show it with a badge.
+ */
+function rtkPayload(): array
+{
+    $pdo = db();
+    $s = $pdo->query(
+        'SELECT total_commands, total_input, total_output, total_saved, avg_savings_pct, fetched_at
+         FROM rtk_summary WHERE id = 1'
+    )->fetch(PDO::FETCH_ASSOC);
+    if (!$s) {
+        return ['empty' => true];
+    }
+
+    $fetchedTs = strtotime($s['fetched_at']) ?: 0;
+    $staleMinutes = max(1, (int)(env()['RTK_STALE_MINUTES'] ?? 10));
+
+    $metrics = fn(array $r): array => [
+        'commands'     => (int)$r['commands'],
+        'inputTokens'  => (int)$r['input_tokens'],
+        'outputTokens' => (int)$r['output_tokens'],
+        'savedTokens'  => (int)$r['saved_tokens'],
+        'savingsPct'   => (float)$r['savings_pct'],
+    ];
+
+    $daily = $pdo->query(
+        'SELECT log_date, commands, input_tokens, output_tokens, saved_tokens, savings_pct
+         FROM rtk_daily ORDER BY log_date ASC'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    $weekly = $pdo->query(
+        'SELECT week_start, week_end, commands, input_tokens, output_tokens, saved_tokens, savings_pct
+         FROM rtk_weekly ORDER BY week_start ASC'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    $monthly = $pdo->query(
+        'SELECT log_month, commands, input_tokens, output_tokens, saved_tokens, savings_pct
+         FROM rtk_monthly ORDER BY log_month ASC'
+    )->fetchAll(PDO::FETCH_ASSOC);
+
+    return [
+        'summary' => [
+            'totalCommands'  => (int)$s['total_commands'],
+            'totalInput'     => (int)$s['total_input'],
+            'totalOutput'    => (int)$s['total_output'],
+            'totalSaved'     => (int)$s['total_saved'],
+            'avgSavingsPct'  => (float)$s['avg_savings_pct'],
+        ],
+        'daily' => array_map(fn(array $r): array => ['date' => $r['log_date']] + $metrics($r), $daily),
+        'weekly' => array_map(
+            fn(array $r): array => ['weekStart' => $r['week_start'], 'weekEnd' => $r['week_end']] + $metrics($r),
+            $weekly
+        ),
+        'monthly' => array_map(fn(array $r): array => ['month' => $r['log_month']] + $metrics($r), $monthly),
+        'fetchedAt' => date('c', $fetchedTs),
+        'stale' => (time() - $fetchedTs) > $staleMinutes * 60,
+    ];
 }
 
 /**

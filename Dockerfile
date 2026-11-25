@@ -14,6 +14,8 @@ FROM php:8.3-apache
 # Stock Debian Apache aliases /icons/ to its own icon set — that would
 # hijack the PWA icon path, so drop that conf (mod_rewrite does all routing).
 RUN docker-php-ext-install pdo_mysql \
+    && apt-get update && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
     && a2enmod rewrite headers expires \
     && rm -f /etc/apache2/mods-enabled/alias.conf
 
